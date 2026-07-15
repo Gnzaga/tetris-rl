@@ -83,6 +83,8 @@ def board_features_batch(rows: np.ndarray) -> np.ndarray:
         n_holes = hole_cells.sum(axis=1)
         holes += n_holes
         rows_with_holes += (n_holes > 0).astype(np.int64)
+        # hole_depth counts ALL filled cells above each hole in its column (not
+        # just the contiguous run) — pinned by test, mirrored in JS engine.
         hole_depth += (hole_cells * col_filled).sum(axis=1)
         col_filled += rb
         above_or = above_or | row
@@ -136,6 +138,9 @@ def board_features(rows) -> tuple[int, int, int, int, int, int]:
             while m:
                 c = (m & -m).bit_length() - 1
                 holes += 1
+                # hole_depth counts ALL filled cells above each hole in its
+                # column (not just the contiguous run) — pinned by test,
+                # mirrored in JS engine.
                 hole_depth += col_filled[c]
                 m &= m - 1
         m = row & FULL_ROW

@@ -44,6 +44,16 @@ BOARDS = {
         mk({18: [0, 1], 19: [0, 1, 2, 3, 4, 5, 6, 7, 8]}),
         (40, 10, 0, 1, 0, 0),
     ),
+    # Distinguishing fixture for the frozen hole_depth semantics: col 4 filled
+    # at rows 14, 16, 18, 19 with stacked holes at rows 15 and 17 separated by
+    # a filled cell. hole_depth counts ALL filled cells above each hole in its
+    # column: hole@15 -> 1 (row 14), hole@17 -> 2 (rows 14, 16), total 3. A
+    # contiguous-run-only reading would give 1 + 1 = 2; this fixture pins the
+    # all-filled-above reading (mirrored in the JS engine).
+    "stacked_holes": (
+        mk({14: [4], 16: [4], 18: [4], 19: [4]}),
+        (48, 14, 2, 0, 3, 2),
+    ),
 }
 
 
@@ -58,6 +68,21 @@ def test_board_features_batch_matches(name):
     board, expected = BOARDS[name]
     got = tuple(int(x) for x in board_features_batch(np.array([board], dtype=np.uint16))[0])
     assert got == expected
+
+
+def test_hole_depth_counts_all_filled_above_not_contiguous_run():
+    # Explicit pin of the adjudicated semantics on the stacked_holes fixture:
+    # holes = 2, rows_with_holes = 2, hole_depth = 3 (all-filled-above reading;
+    # the contiguous-run reading would yield 2). Covers both feature paths.
+    board, _ = BOARDS["stacked_holes"]
+    ref = board_features(board)
+    batch = tuple(
+        int(x) for x in board_features_batch(np.array([board], dtype=np.uint16))[0]
+    )
+    for got in (ref, batch):
+        assert got[2] == 2  # holes
+        assert got[4] == 3  # hole_depth: 1 (hole@15) + 2 (hole@17)
+        assert got[5] == 2  # rows_with_holes
 
 
 def test_batch_matches_reference_on_random_boards():
