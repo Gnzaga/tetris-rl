@@ -1,0 +1,7 @@
+torch
+numpy
+tensorboard
+onnx
+onnxruntime
+pytest
+rich

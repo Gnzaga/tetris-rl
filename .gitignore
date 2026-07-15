@@ -1,0 +1,9 @@
+runs/
+demo/vendor/
+node_modules/
+__pycache__/
+*.egg-info
+*.pyc
+.superpowers/
+.venv/
+.pytest_cache/

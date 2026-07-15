@@ -1,0 +1,60 @@
+{
+  "engine_version": "1",
+  "note": "SRS-canonical tetromino rotation tables. Single source of truth for both the Python and JS engines. Piece list order defines piece indices 0..6: I, O, T, S, Z, J, L. Each rotation state lists distinct [row, col] cell offsets from the top-left of its bounding box, with the box width and height.",
+  "pieces": [
+    {
+      "name": "I",
+      "rotations": [
+        {"width": 4, "height": 1, "cells": [[0, 0], [0, 1], [0, 2], [0, 3]]},
+        {"width": 1, "height": 4, "cells": [[0, 0], [1, 0], [2, 0], [3, 0]]}
+      ]
+    },
+    {
+      "name": "O",
+      "rotations": [
+        {"width": 2, "height": 2, "cells": [[0, 0], [0, 1], [1, 0], [1, 1]]}
+      ]
+    },
+    {
+      "name": "T",
+      "rotations": [
+        {"width": 3, "height": 2, "cells": [[0, 1], [1, 0], [1, 1], [1, 2]]},
+        {"width": 2, "height": 3, "cells": [[0, 0], [1, 0], [1, 1], [2, 0]]},
+        {"width": 3, "height": 2, "cells": [[0, 0], [0, 1], [0, 2], [1, 1]]},
+        {"width": 2, "height": 3, "cells": [[0, 1], [1, 0], [1, 1], [2, 1]]}
+      ]
+    },
+    {
+      "name": "S",
+      "rotations": [
+        {"width": 3, "height": 2, "cells": [[0, 1], [0, 2], [1, 0], [1, 1]]},
+        {"width": 2, "height": 3, "cells": [[0, 0], [1, 0], [1, 1], [2, 1]]}
+      ]
+    },
+    {
+      "name": "Z",
+      "rotations": [
+        {"width": 3, "height": 2, "cells": [[0, 0], [0, 1], [1, 1], [1, 2]]},
+        {"width": 2, "height": 3, "cells": [[0, 1], [1, 0], [1, 1], [2, 0]]}
+      ]
+    },
+    {
+      "name": "J",
+      "rotations": [
+        {"width": 3, "height": 2, "cells": [[0, 0], [1, 0], [1, 1], [1, 2]]},
+        {"width": 2, "height": 3, "cells": [[0, 0], [0, 1], [1, 0], [2, 0]]},
+        {"width": 3, "height": 2, "cells": [[0, 0], [0, 1], [0, 2], [1, 2]]},
+        {"width": 2, "height": 3, "cells": [[0, 1], [1, 1], [2, 0], [2, 1]]}
+      ]
+    },
+    {
+      "name": "L",
+      "rotations": [
+        {"width": 3, "height": 2, "cells": [[0, 2], [1, 0], [1, 1], [1, 2]]},
+        {"width": 2, "height": 3, "cells": [[0, 0], [1, 0], [2, 0], [2, 1]]},
+        {"width": 3, "height": 2, "cells": [[0, 0], [0, 1], [0, 2], [1, 0]]},
+        {"width": 2, "height": 3, "cells": [[0, 0], [0, 1], [1, 1], [2, 1]]}
+      ]
+    }
+  ]
+}
