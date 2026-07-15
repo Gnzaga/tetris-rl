@@ -10,18 +10,7 @@ import json
 import statistics
 
 from tetris.agents import DELLACHERIE_WEIGHTS, LinearAgent, RandomAgent
-from tetris.engine import TetrisEngine
-
-
-def play_game(agent, seed: int, max_pieces: int) -> tuple[int, int]:
-    """Play one game; return (lines, pieces)."""
-    engine = TetrisEngine(seed=seed)
-    while not engine.game_over and engine.pieces < max_pieces:
-        move = agent.act(engine)
-        if move is None:
-            break
-        engine.step(*move)
-    return engine.lines, engine.pieces
+from tetris.evaluation import evaluate, p10
 
 
 def make_agent(kind: str, weights_path: str | None, seed: int):
@@ -39,18 +28,6 @@ def make_agent(kind: str, weights_path: str | None, seed: int):
     raise SystemExit(f"unknown agent: {kind}")
 
 
-def _p10(values: list[int]) -> float:
-    s = sorted(values)
-    if len(s) == 1:
-        return float(s[0])
-    # linear-interpolated 10th percentile
-    rank = 0.10 * (len(s) - 1)
-    lo = int(rank)
-    frac = rank - lo
-    hi = min(lo + 1, len(s) - 1)
-    return s[lo] + frac * (s[hi] - s[lo])
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--agent", choices=["random", "dellacherie", "linear"], required=True)
@@ -60,24 +37,27 @@ def main() -> int:
     ap.add_argument("--max-pieces", type=int, default=50000)
     args = ap.parse_args()
 
-    lines_list = []
-    pieces_list = []
-    for i in range(args.games):
-        agent = make_agent(args.agent, args.weights, seed=args.seed + i)
-        lines, pieces = play_game(agent, seed=args.seed + i, max_pieces=args.max_pieces)
-        lines_list.append(lines)
-        pieces_list.append(pieces)
-        print(f"game {i:>3}  seed={args.seed + i:>6}  lines={lines:>8}  pieces={pieces:>8}")
+    seeds = [args.seed + i for i in range(args.games)]
+    result = evaluate(
+        lambda s: make_agent(args.agent, args.weights, seed=s),
+        seeds,
+        args.max_pieces,
+    )
+    for i, seed in enumerate(seeds):
+        print(
+            f"game {i:>3}  seed={seed:>6}  "
+            f"lines={result.lines[i]:>8}  pieces={result.pieces[i]:>8}"
+        )
 
     print("-" * 48)
     print(f"agent            : {args.agent}")
     print(f"games            : {args.games}")
-    print(f"lines  median    : {statistics.median(lines_list):.1f}")
-    print(f"lines  mean      : {statistics.mean(lines_list):.1f}")
-    print(f"lines  p10       : {_p10(lines_list):.1f}")
-    print(f"pieces median    : {statistics.median(pieces_list):.1f}")
-    print(f"pieces mean      : {statistics.mean(pieces_list):.1f}")
-    print(f"pieces p10       : {_p10(pieces_list):.1f}")
+    print(f"lines  median    : {result.median_lines:.1f}")
+    print(f"lines  mean      : {result.mean_lines:.1f}")
+    print(f"lines  p10       : {result.p10_lines:.1f}")
+    print(f"pieces median    : {statistics.median(result.pieces):.1f}")
+    print(f"pieces mean      : {result.mean_pieces:.1f}")
+    print(f"pieces p10       : {p10(result.pieces):.1f}")
     return 0
 
 
