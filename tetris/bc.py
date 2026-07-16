@@ -46,7 +46,12 @@ _REPO = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = _REPO / "runs" / "bc_data_v1"
 
 NUM_ACTIONS = len(ACTIONS)  # 5
-PACKED_BYTES = OBS_SIZE * OBS_SIZE // 8  # 1152
+PLANE_BYTES = OBS_SIZE * OBS_SIZE // 8  # 1152 (one bitplane)
+# Two bitplanes per frame since the §1 perception amendment (obs values are
+# {0, 128, 255}): plane 0 = "filled at all" (value != 0), plane 1 = "bright"
+# (value == 255). Gray active-piece pixels are filled-but-not-bright.
+PACKED_BYTES = 2 * PLANE_BYTES  # 2304
+AUX_IGNORE = 255  # aux-target mask value (frame has no visible-piece plan)
 WEIGHT_CAP = 20.0  # inverse-frequency weights clipped to this multiple of noop
 
 
@@ -56,14 +61,20 @@ WEIGHT_CAP = 20.0  # inverse-frequency weights clipped to this multiple of noop
 
 
 def pack_obs(obs: np.ndarray) -> np.ndarray:
-    """(96,96) uint8 {0,255} -> (1152,) uint8 packed bits (numpy MSB-first)."""
-    return np.packbits(obs.reshape(-1) != 0)
+    """(96,96) uint8 {0,128,255} -> (2304,) uint8: two packed bitplanes
+    (numpy MSB-first) — [filled = obs != 0 | bright = obs == 255]."""
+    flat = obs.reshape(-1)
+    return np.concatenate([np.packbits(flat != 0), np.packbits(flat == 255)])
 
 
 def unpack_obs(packed: np.ndarray) -> np.ndarray:
-    """(1152,) packed bits -> (96,96) uint8 {0,255} (inverse of :func:`pack_obs`)."""
-    bits = np.unpackbits(np.asarray(packed, dtype=np.uint8))
-    return (bits.astype(np.uint8) * 255).reshape(OBS_SIZE, OBS_SIZE)
+    """(2304,) packed bitplanes -> (96,96) uint8 {0,128,255} (inverse of
+    :func:`pack_obs`)."""
+    packed = np.asarray(packed, dtype=np.uint8)
+    filled = np.unpackbits(packed[:PLANE_BYTES])
+    bright = np.unpackbits(packed[PLANE_BYTES:])
+    # bright implies filled; filled-only pixels are the gray active piece.
+    return (filled * 128 + bright * 127).astype(np.uint8).reshape(OBS_SIZE, OBS_SIZE)
 
 
 def column_heights(rows) -> np.ndarray:
@@ -253,19 +264,22 @@ DART_NOISE_LEVELS = (0.05, 0.10, 0.20)
 
 def _play_dart_episode(relabeler, seed: int, noise_p: float, noise_rng,
                        max_pieces: int, frames_f, actions: array,
-                       episode_ids: array, ep_index: int):
+                       episode_ids: array, ep_index: int, targets: array):
     """One noise-injected relabeler-policy game, streamed like
-    :func:`_play_episode`. Returns (n_frames, lines, pieces, n_noised,
-    n_press_labels)."""
+    :func:`_play_episode`. Also records the expert plan's aux target
+    (rot, col) per frame (AUX_IGNORE pair when undefined). Returns
+    (n_frames, lines, pieces, n_noised, n_press_labels)."""
     env = FrameEnv(seed=seed)
     n = noised = presses = 0
     while not env.game_over and env.pieces < max_pieces:
         if env.is_decision_tick:
             obs = render_env(env)  # what the agent sees, before it acts
             frames_f.write(pack_obs(obs).tobytes())
-            label = relabeler.relabel(env)  # expert action for the CURRENT pose
+            label, t_rot, t_col = relabeler.relabel_with_target(env)
             actions.append(label)
             episode_ids.append(ep_index)
+            targets.append(t_rot)
+            targets.append(t_col)
             if label != 0:
                 presses += 1
             applied = label
@@ -308,6 +322,7 @@ def generate_dart_dataset(
 
     actions = array("B")
     episode_ids = array("i")
+    targets = array("B")  # flat (rot, col) pairs, AUX_IGNORE where undefined
     episodes = []  # (start, length, seed, lines, pieces, noise_p, n_noised)
 
     n = 0
@@ -322,7 +337,7 @@ def generate_dart_dataset(
             start = n
             cnt, lines, pieces, noised, presses = _play_dart_episode(
                 DaggerRelabeler(teacher), seed, p, noise_rng,
-                max_game_pieces, frames_f, actions, episode_ids, ep,
+                max_game_pieces, frames_f, actions, episode_ids, ep, targets,
             )
             episodes.append((start, cnt, seed, int(lines), int(pieces), p, noised))
             n += cnt
@@ -343,8 +358,10 @@ def generate_dart_dataset(
 
     actions_arr = np.frombuffer(actions, dtype=np.uint8).copy()
     episode_arr = np.frombuffer(episode_ids, dtype=np.int32).copy()
+    targets_arr = np.frombuffer(targets, dtype=np.uint8).copy().reshape(-1, 2)
     np.save(out_dir / "actions.npy", actions_arr)
     np.save(out_dir / "episode_id.npy", episode_arr)
+    np.save(out_dir / "targets.npy", targets_arr)
 
     hist = class_histogram(actions_arr)
     meta = {
@@ -357,6 +374,8 @@ def generate_dart_dataset(
         "num_actions": NUM_ACTIONS,
         "actions": list(ACTIONS),
         "source": "dart",
+        "targets": "targets.npy (N,2) uint8 (rot, col); 255 = undefined/masked",
+        "aux_target_coverage": float((targets_arr[:, 0] != AUX_IGNORE).mean()) if n else 0.0,
         "behavior_policy": "current-pose replan relabeler + uniform noise",
         "noise_levels": list(noise_levels),
         "noise_seed": noise_seed,
@@ -379,6 +398,7 @@ def generate_dart_dataset(
             "frames": "frames.u8pack",
             "actions": "actions.npy",
             "episode_id": "episode_id.npy",
+            "targets": "targets.npy",
         },
     }
     with open(out_dir / "meta.json", "w") as f:
@@ -405,6 +425,11 @@ class BCDataset:
         out_dir = Path(out_dir)
         with open(out_dir / "meta.json") as f:
             self.meta = json.load(f)
+        if int(self.meta["packed_bytes"]) != PACKED_BYTES:
+            raise ValueError(
+                f"{out_dir}: packed_bytes {self.meta['packed_bytes']} != "
+                f"{PACKED_BYTES} — dataset predates the two-bitplane format "
+                f"(§1 perception amendment); regenerate it")
         self.n = int(self.meta["n_frames"])
         self.frames = np.memmap(
             out_dir / "frames.u8pack", dtype=np.uint8, mode="r",
@@ -412,6 +437,11 @@ class BCDataset:
         )
         self.actions = np.load(out_dir / "actions.npy")
         self.episode_id = np.load(out_dir / "episode_id.npy")
+        # Aux target labels (rot, col) per frame; AUX_IGNORE where undefined
+        # (not fully visible / no reachable plan / legacy corpus without them).
+        tpath = out_dir / "targets.npy"
+        self.targets = (np.load(tpath) if tpath.exists()
+                        else np.full((self.n, 2), AUX_IGNORE, dtype=np.uint8))
         # Per-frame episode-start index for O(1) stack reconstruction.
         self.ep_start = np.empty(self.n, dtype=np.int64)
         for start, length, *_ in self.meta["episodes"]:
@@ -428,11 +458,20 @@ class BCDataset:
         s = int(self.ep_start[i])
         return [max(i - 3, s), max(i - 2, s), max(i - 1, s), i]
 
+    def _frames_float(self, flat: np.ndarray) -> np.ndarray:
+        """Unpack frames at ``flat`` indices -> (K, 96, 96) float32, values in
+        {0, 128/255, 1} — bit-identical to the closed-loop uint8/255.0 path."""
+        bits = np.unpackbits(self.frames[flat], axis=1)  # (K, 18432)
+        npx = OBS_SIZE * OBS_SIZE
+        filled = bits[:, :npx].astype(np.float32)
+        bright = bits[:, npx:].astype(np.float32)
+        vals = (filled * 128.0 + bright * 127.0) / 255.0
+        return vals.reshape(len(flat), OBS_SIZE, OBS_SIZE)
+
     def stack(self, i: int) -> np.ndarray:
         """(4,96,96) float32 in [0,1]: the last-4-observation policy input."""
-        idx = self.stack_indices(i)
-        bits = np.unpackbits(self.frames[idx], axis=1)  # (4, 9216)
-        return bits.astype(np.float32).reshape(4, OBS_SIZE, OBS_SIZE)
+        idx = np.asarray(self.stack_indices(i), dtype=np.int64)
+        return self._frames_float(idx)
 
     def batch_stacks(self, idx: np.ndarray) -> np.ndarray:
         """Vectorized :meth:`stack` for a batch of indices -> (B,4,96,96) float32
@@ -447,8 +486,7 @@ class BCDataset:
             axis=1,
         )  # (B, 4)
         flat = src.reshape(-1)
-        bits = np.unpackbits(self.frames[flat], axis=1)  # (B*4, 9216)
-        return bits.astype(np.float32).reshape(len(idx), 4, OBS_SIZE, OBS_SIZE)
+        return self._frames_float(flat).reshape(len(idx), 4, OBS_SIZE, OBS_SIZE)
 
 
 # ==========================================================================
@@ -535,6 +573,7 @@ class MultiBCDataset:
         self.offsets = np.concatenate([[0], np.cumsum(self.lengths)]).astype(np.int64)
         self.n = int(self.offsets[-1])
         self.actions = np.concatenate([d.actions for d in datasets])
+        self.targets = np.concatenate([d.targets for d in datasets])
 
     def __len__(self) -> int:
         return self.n
@@ -574,8 +613,10 @@ def balanced_batches(dataset, batch_size: int, total_steps: int,
     than the balanced stream consumes (rot_ccw ~0.1% of frames), so each of
     their frames recurs many times while the majority class is subsampled; this
     is the intended trade. Loss is UNWEIGHTED cross-entropy — the balance lives
-    in the sampler, not the loss (no residual weights)."""
+    in the sampler, not the loss (no residual weights). Yields 3-tuples
+    ``(stacks, labels, aux_targets[B,2])``."""
     actions = np.asarray(dataset.actions)
+    targets = np.asarray(dataset.targets)
     pools = [np.flatnonzero(actions == a) for a in range(NUM_ACTIONS)]
     present = [p for p in pools if len(p)]
     k = len(present)
@@ -587,7 +628,7 @@ def balanced_batches(dataset, batch_size: int, total_steps: int,
         ]
         idx = np.concatenate(parts)
         rng.shuffle(idx)
-        yield dataset.batch_stacks(idx), actions[idx].astype(np.int64)
+        yield dataset.batch_stacks(idx), actions[idx].astype(np.int64), targets[idx]
 
 
 def noop_press_batches(dataset, batch_size: int, total_steps: int,
@@ -600,8 +641,10 @@ def noop_press_batches(dataset, batch_size: int, total_steps: int,
     one-per-class). Softer than the 5-way-uniform :func:`balanced_batches` —
     that inflated press priors ~4x over noop and caused false-press thrashing
     in closed loop. Per-class draws are WITH replacement; loss stays UNWEIGHTED
-    cross-entropy (the balance lives in the sampler)."""
+    cross-entropy (the balance lives in the sampler). Yields 3-tuples
+    ``(stacks, labels, aux_targets[B,2])``."""
     actions = np.asarray(dataset.actions)
+    targets = np.asarray(dataset.targets)
     noop_pool = np.flatnonzero(actions == 0)
     press_pools = [p for p in (np.flatnonzero(actions == a)
                                for a in range(1, NUM_ACTIONS)) if len(p)]
@@ -619,21 +662,39 @@ def noop_press_batches(dataset, batch_size: int, total_steps: int,
                                            size=base + (1 if j < rem else 0))])
         idx = np.concatenate(parts)
         rng.shuffle(idx)
-        yield dataset.batch_stacks(idx), actions[idx].astype(np.int64)
+        yield dataset.batch_stacks(idx), actions[idx].astype(np.int64), targets[idx]
+
+
+# §6 perception amendment: aux (rot, col) CE weight. Set 0.1 (not the original
+# 0.5): the attempt-5 mini ablation showed the dense 14-way aux gradients crowd
+# out the sparse action signal at 0.5 (off-manifold press recall 0.27x vs 1.28x
+# without aux at an 8k-step budget).
+AUX_LOSS_WEIGHT = 0.1
 
 
 def train_step(model, optimizer, stacks: np.ndarray, labels: np.ndarray,
-               device: str) -> float:
-    """One unweighted cross-entropy optimizer step; returns the scalar loss.
-    (Class balance is the sampler's job — see :func:`balanced_batches`.)"""
+               device: str, targets: np.ndarray | None = None) -> float:
+    """One optimizer step: unweighted action cross-entropy plus, where aux
+    targets are defined (rows != AUX_IGNORE), ``AUX_LOSS_WEIGHT * (CE(rot) +
+    CE(col))`` on the aux heads (§6 perception amendment; train-time only —
+    inference is still argmax over the action head). Returns the scalar total
+    loss. (Class balance is the sampler's job.)"""
     import torch
     import torch.nn.functional as F
 
     model.train()
     x = torch.from_numpy(stacks).to(device)
     y = torch.from_numpy(labels).to(device)
-    logits, _ = model(x)
+    logits, _, (aux_rot, aux_col) = model(x, return_aux=True)
     loss = F.cross_entropy(logits, y)
+    if targets is not None:
+        t = torch.from_numpy(targets.astype(np.int64)).to(device)
+        mask = t[:, 0] != AUX_IGNORE
+        if bool(mask.any()):
+            loss = loss + AUX_LOSS_WEIGHT * (
+                F.cross_entropy(aux_rot[mask], t[mask, 0])
+                + F.cross_entropy(aux_col[mask], t[mask, 1])
+            )
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -752,6 +813,7 @@ def dagger_rollout(model, teacher, target_frames: int, base_seed: int,
     packed: list[np.ndarray] = []
     actions = array("B")
     ep_ids = array("i")
+    targets = array("B")  # flat (rot, col) aux pairs, AUX_IGNORE when undefined
     episodes = []
     total = 0
     ep = 0
@@ -774,10 +836,12 @@ def dagger_rollout(model, teacher, target_frames: int, base_seed: int,
                     h.append(obs)
                 stack = (np.stack(h).astype(np.float32) / 255.0)[None]
                 student_a = int(_greedy_actions(model, stack, device)[0])
-                label = relab.relabel(env)  # expert action for the CURRENT pose
+                label, t_rot, t_col = relab.relabel_with_target(env)
                 packed.append(pack_obs(obs))
                 actions.append(label)
                 ep_ids.append(ep)
+                targets.append(t_rot)
+                targets.append(t_col)
                 total += 1
                 env.apply_action(student_a)
             env.tick()
@@ -792,6 +856,7 @@ def dagger_rollout(model, teacher, target_frames: int, base_seed: int,
         "packed": packed,
         "actions": np.frombuffer(actions, dtype=np.uint8).copy(),
         "episode_id": np.frombuffer(ep_ids, dtype=np.int32).copy(),
+        "targets": np.frombuffer(targets, dtype=np.uint8).copy().reshape(-1, 2),
         "episodes": episodes,
         "n_frames": total,
         "elapsed_s": round(time.perf_counter() - t0, 2),
@@ -809,6 +874,8 @@ def write_dagger_dataset(out_dir: str | Path, roll: dict) -> Path:
     frames_arr.tofile(out_dir / "frames.u8pack")
     np.save(out_dir / "actions.npy", roll["actions"])
     np.save(out_dir / "episode_id.npy", roll["episode_id"])
+    if "targets" in roll:
+        np.save(out_dir / "targets.npy", roll["targets"])
     hist = class_histogram(roll["actions"])
     n = int(roll["n_frames"])
     meta = {

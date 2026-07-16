@@ -1,10 +1,11 @@
-"""96x96 grayscale observation rasterizer (PLAN2.md §1, Phase C).
+"""96x96 grayscale observation rasterizer (PLAN2.md §1, Phase C; perception
+amendment).
 
 Renders the "camera" the pixel agent sees: an integer-aligned, anti-aliasing-free
 96x96 uint8 grayscale image of the frame-layer state. Filled stack cells, the
-active piece, and the next-piece preview all render 255 (the active piece is NOT
-visually distinct from the stack — a camera could not tell them apart); empty is
-0; the board border is 255.
+next-piece preview, and the board border render 255; the ACTIVE piece renders
+gray 128 (§1 perception amendment — a real Tetris screen draws the falling piece
+in its own color, so the camera may see it distinctly); empty is 0.
 
 Frozen pixel layout (identical here and in demo/js/render_obs.js; changing any
 constant breaks the bit-exact CRC32 fixtures):
@@ -52,11 +53,12 @@ PREVIEW_X = 56
 PREVIEW_Y = 8
 
 FILLED = 255
+ACTIVE = 128  # active-piece gray (§1 perception amendment)
 
 
-def _fill_cell(buf: np.ndarray, x0: int, y0: int) -> None:
-    """Set the 4x4 block whose top-left is (x0, y0) to FILLED (in-place)."""
-    buf[y0:y0 + CELL, x0:x0 + CELL] = FILLED
+def _fill_cell(buf: np.ndarray, x0: int, y0: int, value: int = FILLED) -> None:
+    """Set the 4x4 block whose top-left is (x0, y0) to ``value`` (in-place)."""
+    buf[y0:y0 + CELL, x0:x0 + CELL] = value
 
 
 def render_obs(rows, piece: int, rot: int, col: int, row: int,
@@ -85,12 +87,13 @@ def render_obs(rows, piece: int, rot: int, col: int, row: int,
             if (bits >> c) & 1:
                 _fill_cell(buf, BOARD_X + c * CELL, y0)
 
-    # Active piece (cells above the board, row+ro < 0, are not drawn).
+    # Active piece renders gray ACTIVE=128 (cells above the board, row+ro < 0,
+    # are not drawn). Collision rules guarantee no overlap with the stack.
     for ro, co in PIECES[piece][rot].cells:
         rr = row + ro
         cc = col + co
         if 0 <= rr < HEIGHT and 0 <= cc < WIDTH:
-            _fill_cell(buf, BOARD_X + cc * CELL, BOARD_Y + rr * CELL)
+            _fill_cell(buf, BOARD_X + cc * CELL, BOARD_Y + rr * CELL, ACTIVE)
 
     # Next-piece preview at its rotation-0 bbox, top-left aligned, no border.
     for ro, co in PIECES[next_piece][0].cells:

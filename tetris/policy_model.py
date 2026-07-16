@@ -51,13 +51,21 @@ class PolicyNet(nn.Module):
         self.fc = nn.Linear(_CONV_OUT, 256)
         self.pi = nn.Linear(256, NUM_ACTIONS)
         self.v = nn.Linear(256, 1)
+        # Aux supervised target heads (§6 perception amendment): predict the
+        # expert plan's (rotation_index, column) for the current piece.
+        # TRAIN-TIME ONLY — inference remains argmax over `pi`'s logits.
+        self.aux_rot = nn.Linear(256, 4)
+        self.aux_col = nn.Linear(256, 10)
 
-    def forward(self, x: torch.Tensor, return_activations: bool = False):
+    def forward(self, x: torch.Tensor, return_activations: bool = False,
+                return_aux: bool = False):
         """``[B, 4, 96, 96]`` -> ``(logits [B,5], value [B])``.
 
         With ``return_activations=True`` also returns an ordered dict of the five
         named taps (``conv1``/``conv2``/``conv3`` post-ReLU feature maps, ``fc``
-        post-ReLU 256-vector, ``logits``) for the demo / ONNX export.
+        post-ReLU 256-vector, ``logits``) for the demo / ONNX export. With
+        ``return_aux=True`` (training) also returns ``(aux_rot [B,4],
+        aux_col [B,10])`` target-prediction logits.
         """
         c1 = F.relu(self.conv1(x))
         c2 = F.relu(self.conv2(c1))
@@ -66,6 +74,8 @@ class PolicyNet(nn.Module):
         fc = F.relu(self.fc(flat))
         logits = self.pi(fc)
         value = self.v(fc).squeeze(-1)
+        if return_aux:
+            return logits, value, (self.aux_rot(fc), self.aux_col(fc))
         if return_activations:
             acts = {
                 "conv1": c1,

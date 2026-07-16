@@ -228,9 +228,12 @@ class _DaggerRelabelCore:
         self._placements: list | None = None
         self._order = None
 
-    def relabel(self, env: FrameEnv) -> int:
+    def relabel_with_target(self, env: FrameEnv) -> tuple[int, int, int]:
+        """(action, target_rot, target_col) for the CURRENT pose. Targets are
+        (255, 255) when undefined: piece not fully visible (§4 — the aux head
+        may not train on invisible state either) or nothing reachable."""
         if not fully_visible(env):  # §4 amendment: no label before the camera sees it
-            return NOOP
+            return NOOP, 255, 255
         if self._placements is None or env.pieces != self._pieces:
             scored = self.teacher.scores(_placement_engine(env))
             self._pieces = env.pieces
@@ -245,8 +248,11 @@ class _DaggerRelabelCore:
             lock = simulate_script(clone_env(env), script)
             if (lock is not None and lock["r"] == rot and lock["c"] == col
                     and not lock["tuck"]):
-                return script[0] if script else NOOP
-        return NOOP
+                return (script[0] if script else NOOP), rot, col
+        return NOOP, 255, 255
+
+    def relabel(self, env: FrameEnv) -> int:
+        return self.relabel_with_target(env)[0]
 
 
 class DaggerRelabeler(_DaggerRelabelCore):

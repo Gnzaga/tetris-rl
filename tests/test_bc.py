@@ -44,9 +44,20 @@ def test_pack_unpack_roundtrip():
         env.tick()
     obs = render_env(env)
     packed = pack_obs(obs)
-    assert packed.shape == (1152,)
+    assert packed.shape == (2304,)  # two bitplanes (filled | bright)
     assert packed.dtype == np.uint8
     np.testing.assert_array_equal(unpack_obs(packed), obs)
+
+
+def test_pack_unpack_roundtrip_gray_piece():
+    # A frame with the active piece VISIBLE must round-trip its gray 128 cells
+    # exactly through the two-bitplane packing.
+    env = FrameEnv(seed=5)
+    while not any(env.row + ro >= 0 for ro, _ in PIECES[env.piece][env.rot].cells):
+        env.tick()
+    obs = render_env(env)
+    assert 128 in np.unique(obs)
+    np.testing.assert_array_equal(unpack_obs(pack_obs(obs)), obs)
 
 
 # -- class weighting -------------------------------------------------------
@@ -88,7 +99,7 @@ def test_dataset_shapes_and_consistency(tiny_dataset):
     ds = BCDataset(out)
     n = meta["n_frames"]
     assert len(ds) == n
-    assert ds.frames.shape == (n, 1152)
+    assert ds.frames.shape == (n, 2304)
     assert ds.actions.shape == (n,)
     assert ds.episode_id.shape == (n,)
     assert n == sum(e[1] for e in meta["episodes"])
@@ -133,13 +144,15 @@ def test_stack_reconstruction_and_boundary(tiny_dataset):
             assert ds.stack_indices(start + 2) == [start, start, start + 1, start + 2]
             i = start + 3
             assert ds.stack_indices(i) == [start, start + 1, start + 2, i]
-    # Stack tensor: (4,96,96) float in {0,1}, last slice == normalized frame(i).
+    # Stack tensor: (4,96,96) float in {0, 128/255, 1}, last slice == the
+    # normalized frame(i) EXACTLY as the closed-loop uint8/255.0 path computes it.
     i = min(meta["n_frames"] - 1, meta["episodes"][0][0] + meta["episodes"][0][1] - 1)
     st = ds.stack(i)
     assert st.shape == (4, 96, 96)
     assert st.dtype == np.float32
-    assert set(np.unique(st).tolist()) <= {0.0, 1.0}
-    np.testing.assert_array_equal((st[3] * 255).astype(np.uint8), ds.frame(i))
+    gray = float(np.float32(np.float32(128.0) / np.float32(255.0)))
+    assert set(np.unique(st).tolist()) <= {0.0, gray, 1.0}
+    np.testing.assert_array_equal(st[3], ds.frame(i).astype(np.float32) / 255.0)
 
 
 # -- linear-probe gate (slow) ----------------------------------------------

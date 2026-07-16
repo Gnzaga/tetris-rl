@@ -44,8 +44,22 @@ def test_named_activation_shapes():
 
 
 def test_param_count_is_stable():
-    # Frozen arch => a fixed parameter count; guards accidental layer edits.
-    assert count_parameters(PolicyNet()) == 547_670
+    # Frozen arch + §6 aux target heads (rot 256->4, col 256->10) => fixed
+    # parameter count; guards accidental layer edits.
+    assert count_parameters(PolicyNet()) == 547_670 + (256 * 4 + 4) + (256 * 10 + 10)
+
+
+def test_aux_head_shapes_and_isolation():
+    # return_aux yields (rot [B,4], col [B,10]) logits; the plain two-tuple
+    # forward (inference path) is unchanged by the aux heads' existence.
+    m = PolicyNet()
+    x = torch.rand(3, 4, 96, 96)
+    logits, value, (aux_rot, aux_col) = m(x, return_aux=True)
+    assert aux_rot.shape == (3, 4)
+    assert aux_col.shape == (3, 10)
+    logits2, value2 = m(x)
+    torch.testing.assert_close(logits, logits2)
+    torch.testing.assert_close(value, value2)
 
 
 def test_flatten_matches_conv_out():

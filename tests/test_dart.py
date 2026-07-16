@@ -154,6 +154,7 @@ class _FakeDS:
 
     def __init__(self, actions):
         self.actions = np.asarray(actions, dtype=np.uint8)
+        self.targets = np.full((len(self.actions), 2), 255, dtype=np.uint8)
 
     def __len__(self):
         return len(self.actions)
@@ -172,8 +173,9 @@ def test_noop_press_batches_composition():
     ds = _FakeDS(actions)
     batches = list(noop_press_batches(ds, 64, 5, rng))
     assert len(batches) == 5
-    for stacks, labels in batches:
+    for stacks, labels, targets in batches:
         assert len(labels) == 64
+        assert targets.shape == (64, 2)
         n_noop = int((labels == 0).sum())
         assert n_noop == 32  # exactly half
         # presses ~uniform among the 3 present classes: 32 = 11+11+10
@@ -190,5 +192,26 @@ def test_noop_press_batches_degenerate_all_noop():
     ds = _FakeDS(np.zeros(50, dtype=np.uint8))
     batches = list(noop_press_batches(ds, 16, 3, rng))
     assert len(batches) == 3
-    for _, labels in batches:
+    for _, labels, _t in batches:
         assert (labels == 0).all()
+
+
+# -- aux target labels (§6 perception amendment) ------------------------------
+
+
+def test_dart_aux_targets_present_and_valid(tmp_path):
+    out, meta = _gen(tmp_path, "t", total_pieces=6)
+    t = np.load(out / "targets.npy")
+    assert t.shape == (meta["n_frames"], 2)
+    assert t.dtype == np.uint8
+    defined = t[:, 0] != 255
+    # Coverage: most frames have a visible-piece plan; invisible frames masked.
+    assert 0.5 < defined.mean() <= 1.0
+    assert meta["aux_target_coverage"] == pytest.approx(float(defined.mean()))
+    assert (t[defined, 0] < 4).all()    # rotation index 0..3
+    assert (t[defined, 1] < 10).all()   # column 0..9
+    assert (t[~defined, 1] == 255).all()  # masked rows mask BOTH fields
+    # Target is piece-constant between presses: within an episode, frames of the
+    # same piece whose action label is noop share the previous target unless the
+    # plan changed — weak sanity: at least one defined target repeats.
+    assert len(np.unique(t[defined], axis=0)) < defined.sum()

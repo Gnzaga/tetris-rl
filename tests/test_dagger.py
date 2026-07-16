@@ -248,7 +248,8 @@ def test_balanced_batches_uniformish(tiny_ds):
     k = len(present)
     batches = list(balanced_batches(ds, 65, 4, rng))
     assert len(batches) == 4  # yields exactly total_steps batches
-    for stacks, labels in batches:
+    for stacks, labels, targets in batches:
+        assert targets.shape == (65, 2)  # aux (rot, col), 255-masked when absent
         assert stacks.shape == (65, 4, 96, 96)
         assert labels.shape == (65,) and labels.dtype == np.int64
         counts = np.bincount(labels, minlength=5)
@@ -271,9 +272,9 @@ def test_balanced_batches_labels_match_frames(tiny_ds):
     for i in range(len(ds)):
         key_to_actions.setdefault(ds.frames[i].tobytes(), set()).add(int(ds.actions[i]))
     rng = np.random.default_rng(1)
-    stacks, labels = next(balanced_batches(ds, 32, 1, rng))
+    stacks, labels, _targets = next(balanced_batches(ds, 32, 1, rng))
     for j in range(32):
-        frame = (stacks[j, 3] * 255).astype(np.uint8)
+        frame = np.rint(stacks[j, 3] * 255).astype(np.uint8)  # rint: 128/255*255
         key = pack_obs(frame).tobytes()
         assert int(labels[j]) in key_to_actions[key]
 

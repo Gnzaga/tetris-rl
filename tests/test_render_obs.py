@@ -2,7 +2,8 @@
 
 Covers the frozen 96x96 pixel layout on hand-built states (border ring at the
 exact coordinates, board-cell -> 4x4 rect mapping, active piece drawn / above-
-board cells omitted, preview at its region), value invariants ({0,255} only),
+board cells omitted, preview at its region), value invariants ({0,128,255};
+active piece gray 128 per the §1 perception amendment),
 and that the recorded obs_v2.json CRC32 fixtures reproduce from Python (the same
 bytes the JS suite asserts bit-exactly).
 """
@@ -35,11 +36,14 @@ I, O, T, S, Z, J, L = range(7)
 EMPTY = [0] * 20
 
 
-def test_shape_dtype_and_binary_values():
+def test_shape_dtype_and_value_set():
     obs = render_obs(EMPTY, I, 0, 3, -1, O)
     assert obs.shape == (OBS_SIZE, OBS_SIZE)
     assert obs.dtype == np.uint8
-    assert set(np.unique(obs).tolist()) <= {0, 255}
+    assert set(np.unique(obs).tolist()) <= {0, 128, 255}
+    # With the active piece visible, all three values appear (piece gray 128).
+    obs2 = render_obs(EMPTY, I, 0, 3, 5, O)
+    assert set(np.unique(obs2).tolist()) == {0, 128, 255}
 
 
 def test_border_ring_exact_coords():
@@ -77,10 +81,10 @@ def test_active_piece_drawn_and_above_board_omitted():
     # top cells (row -1) are above the board (omitted) and the bottom cells
     # (row 0) are drawn.
     obs = render_obs(EMPTY, O, 0, 4, -1, I)
-    # Bottom row of the O (board row 0) at cols 4,5 is drawn.
+    # Bottom row of the O (board row 0) at cols 4,5 is drawn gray (active=128).
     for c in (4, 5):
         x0 = BOARD_X + c * CELL
-        assert np.all(obs[BOARD_Y:BOARD_Y + CELL, x0:x0 + CELL] == 255)
+        assert np.all(obs[BOARD_Y:BOARD_Y + CELL, x0:x0 + CELL] == 128)
     # Nothing is drawn above the board border (rows above BORDER contain only the
     # ring / preview, never active-piece cells).
     # Fully above the board => no active cells anywhere in the interior.
@@ -96,16 +100,17 @@ def test_preview_region_and_no_border():
     assert np.all(obs[PREVIEW_Y:PREVIEW_Y + 2 * CELL, PREVIEW_X - 1] == 0)
 
 
-def test_active_piece_not_distinct_from_stack():
-    # A stack cell and an active-piece cell landing on the same board cell render
-    # identically (both 255) — the camera cannot tell them apart.
+def test_active_piece_distinct_from_stack():
+    # §1 perception amendment: the SAME board cell renders 255 as locked stack
+    # but 128 as active piece — the camera can now tell them apart.
     rows = [0] * 20
     rows[10] = 1 << 2
     a = render_obs(rows, I, 0, 3, -50, O)           # cell only in stack
     b = render_obs([0] * 20, I, 1, 2, 10, O)         # vertical I overlapping col 2
     x0, y0 = BOARD_X + 2 * CELL, BOARD_Y + 10 * CELL
     assert np.all(a[y0:y0 + CELL, x0:x0 + CELL] == 255)
-    assert np.all(b[y0:y0 + CELL, x0:x0 + CELL] == 255)
+    assert np.all(b[y0:y0 + CELL, x0:x0 + CELL] == 128)
+    assert 128 != 255  # the distinctness the four post-mortems demanded
 
 
 def test_obs_fixtures_reproduce():

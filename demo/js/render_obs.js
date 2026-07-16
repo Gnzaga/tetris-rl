@@ -2,9 +2,9 @@
 //
 // Bit-exact port of tetris/render_obs.py. Renders the "camera" the pixel agent
 // sees into a plain Uint8Array(96*96) — no DOM / canvas required (Phase F can
-// blit it to a canvas with putImageData). Filled stack cells, the active piece,
-// and the next-piece preview all render 255 (the active piece is NOT visually
-// distinct from the stack); empty is 0; the board border is 255.
+// blit it to a canvas with putImageData). Filled stack cells, the next-piece
+// preview, and the border render 255; the ACTIVE piece renders gray 128 (§1
+// perception amendment); empty is 0.
 //
 // Frozen pixel layout (identical to render_obs.py; changing any constant breaks
 // the bit-exact CRC32 fixtures):
@@ -37,14 +37,15 @@ export const PREVIEW_X = 56;
 export const PREVIEW_Y = 8;
 
 const FILLED = 255;
+const ACTIVE = 128; // active-piece gray (§1 perception amendment)
 
 export function makeRenderObs(piecesJson) {
   const { PIECES } = makeEngine(piecesJson);
 
-  function fillCell(buf, x0, y0) {
+  function fillCell(buf, x0, y0, value = FILLED) {
     for (let dy = 0; dy < CELL; dy++) {
       const base = (y0 + dy) * OBS_SIZE + x0;
-      for (let dx = 0; dx < CELL; dx++) buf[base + dx] = FILLED;
+      for (let dx = 0; dx < CELL; dx++) buf[base + dx] = value;
     }
   }
 
@@ -72,12 +73,12 @@ export function makeRenderObs(piecesJson) {
       }
     }
 
-    // Active piece (cells above the board are not drawn).
+    // Active piece renders gray ACTIVE=128 (cells above the board not drawn).
     for (const [ro, co] of PIECES[piece][rot].cells) {
       const rr = row + ro;
       const cc = col + co;
       if (rr >= 0 && rr < HEIGHT && cc >= 0 && cc < WIDTH) {
-        fillCell(buf, BOARD_X + cc * CELL, BOARD_Y + rr * CELL);
+        fillCell(buf, BOARD_X + cc * CELL, BOARD_Y + rr * CELL, ACTIVE);
       }
     }
 

@@ -63,6 +63,11 @@ def _build_config(args, device, total_steps, n_frames) -> dict:
                    "press classes, per-class draw with replacement), UNWEIGHTED "
                    "cross-entropy (PLAN2.md §6 covariate-shift amendment); "
                    "steps = epochs * ceil(n/batch)",
+        "aux_heads": f"target (rot 4-way, col 10-way) CE, weight "
+                     f"{bc.AUX_LOSS_WEIGHT}, masked where undefined; train-time "
+                     f"only (§6 perception amendment; 0.1 per attempt-5 ablation)",
+        "obs_render": "active piece gray 128, stack/preview/border 255 "
+                      "(§1 perception amendment)",
         "dagger_retrain_epochs": 1,
         "dagger_aggregation": "base + all dagger shards, balanced-sampled for 1 "
                               "epoch's worth of steps, continues optimizer state",
@@ -138,8 +143,9 @@ def train(run, cfg, args, console) -> dict:
     loss_sum = loss_cnt = 0
     t_last = time.perf_counter()
     seen_last = 0
-    for stacks, labels in bc.noop_press_batches(dataset, cfg["batch_size"], total, rng):
-        loss = bc.train_step(model, optimizer, stacks, labels, device)
+    for stacks, labels, targets in bc.noop_press_batches(dataset, cfg["batch_size"],
+                                                         total, rng):
+        loss = bc.train_step(model, optimizer, stacks, labels, device, targets)
         step += 1
         loss_sum += loss
         loss_cnt += 1
@@ -185,9 +191,9 @@ def train(run, cfg, args, console) -> dict:
         console.print(f"  relabeled {roll['n_frames']:,} frames in {roll['elapsed_s']}s; "
                       f"combined = {len(combined):,} frames; retrain 1 epoch's worth "
                       f"= {retrain_steps:,} balanced steps")
-        for stacks, labels in bc.noop_press_batches(combined, cfg["batch_size"],
-                                                    retrain_steps, rng):
-            loss = bc.train_step(model, optimizer, stacks, labels, device)
+        for stacks, labels, targets in bc.noop_press_batches(combined, cfg["batch_size"],
+                                                             retrain_steps, rng):
+            loss = bc.train_step(model, optimizer, stacks, labels, device, targets)
             step += 1
         ev, pc = _do_eval(run, model, cfg, step, "dagger", loss, 0.0, combined, rng, console)
         _save_ckpt(run, f"nn_dagger_{it}", model, step, "dagger", pc, ev.median_lines)
