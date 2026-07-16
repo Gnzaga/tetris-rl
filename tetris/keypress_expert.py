@@ -61,6 +61,22 @@ from tetris.rng import SevenBag
 _REPO = Path(__file__).resolve().parent.parent
 TD_V1_CHECKPOINT = _REPO / "runs" / "td_v1" / "checkpoints" / "nn_step_2000000.pt"
 CEM_V1_WEIGHTS = _REPO / "runs" / "cem_v1" / "checkpoints" / "cem_final.json"
+CEM_SMOKE_WEIGHTS = _REPO / "runs" / "cem_smoke" / "checkpoints" / "cem_final.json"
+
+
+def resolve_cem_checkpoint():
+    """Best available CEM teacher checkpoint, or ``None``.
+
+    Prefers the full ``cem_v1`` run; falls back to the ``cem_smoke`` run so the
+    smoke pipeline and the CEM-teacher integration tests work on a fresh clone
+    (where only smoke runs exist). ``make_teacher`` itself stays strict — this
+    is used only where a smoke-friendly fallback is wanted (train_bc --smoke,
+    tests), never silently in real training.
+    """
+    for path in (CEM_V1_WEIGHTS, CEM_SMOKE_WEIGHTS):
+        if path.exists():
+            return path
+    return None
 
 
 # --------------------------------------------------------------------------

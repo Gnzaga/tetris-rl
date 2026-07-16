@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -78,10 +78,13 @@ test("parsePixelManifest: v1-only manifest -> null (v1 demo untouched)", () => {
   assert.equal(parsePixelManifest({}), null);
 });
 
-test("parsePixelManifest: real demo manifest exposes v2 pixel block", () => {
-  const manifest = JSON.parse(
-    readFileSync(join(ROOT, "demo", "models", "manifest.json"), "utf8"),
-  );
+const MANIFEST_PATH = join(ROOT, "demo", "models", "manifest.json");
+test("parsePixelManifest: real demo manifest exposes v2 pixel block", {
+  skip: existsSync(MANIFEST_PATH)
+    ? false
+    : "demo/models/manifest.json not built (run scripts/export_demo*.py)",
+}, () => {
+  const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"));
   // v1 keys still present (demo compatibility).
   assert.ok(Array.isArray(manifest.agents), "v1 agents list intact");
   assert.ok(manifest.selftest, "v1 selftest intact");

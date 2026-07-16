@@ -32,14 +32,22 @@ from tetris.keypress_expert import (
     make_teacher,
     naive_script,
     relabel_action,
+    resolve_cem_checkpoint,
     simulate_script,
 )
 
 I, O, T, S, Z, J, L = range(7)
 
+# CEM teacher checkpoint (cem_v1 if trained, else cem_smoke); skip if neither.
+_CEM_CKPT = resolve_cem_checkpoint()
+pytestmark = pytest.mark.skipif(
+    _CEM_CKPT is None,
+    reason="no CEM teacher checkpoint (run scripts/train_cem.py [--smoke])",
+)
+
 
 def _cem():
-    return make_teacher("cem")
+    return make_teacher("cem", _CEM_CKPT)
 
 
 # -- current-pose script vs naive spawn-script -----------------------------
@@ -206,7 +214,8 @@ def tiny_ds(tmp_path_factory):
     from tetris.bc import generate_dataset
     out = tmp_path_factory.mktemp("bc_batch")
     generate_dataset(out_dir=out, total_pieces=30, max_game_pieces=8,
-                     base_seed=321000, teacher_kind="cem", progress=False)
+                     base_seed=321000, teacher_kind="cem",
+                     checkpoint=_CEM_CKPT, progress=False)
     return out
 
 

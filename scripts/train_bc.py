@@ -37,7 +37,7 @@ from rich.console import Console
 
 from tetris import bc
 from tetris.frame_env import ACTIONS
-from tetris.keypress_expert import make_teacher
+from tetris.keypress_expert import make_teacher, resolve_cem_checkpoint
 from tetris.policy_model import PolicyNet, count_parameters
 from tetris.runio import RunWriter
 
@@ -224,12 +224,13 @@ def train(run, cfg, args, console) -> dict:
     return payload["results"] | {"milestones": milestones, "total_steps": total}
 
 
-def _make_smoke_dataset(console) -> str:
+def _make_smoke_dataset(console, checkpoint=None) -> str:
     """Tiny synthetic CEM-expert dataset for the smoke gate (a few short games)."""
     d = tempfile.mkdtemp(prefix="bc_smoke_data_")
     console.print(f"[cyan]smoke[/cyan]: generating tiny dataset in {d}")
     bc.generate_dataset(out_dir=d, total_pieces=12, max_game_pieces=6,
-                        base_seed=444000, teacher_kind="cem", progress=False)
+                        base_seed=444000, teacher_kind="cem",
+                        checkpoint=checkpoint, progress=False)
     return d
 
 
@@ -266,6 +267,14 @@ def parse_args(argv=None):
         args.eval_max_pieces = 60
         args.pca_samples = 512
         args.progress = True
+        if args.checkpoint is None:
+            ckpt = resolve_cem_checkpoint()
+            if ckpt is None:
+                raise SystemExit(
+                    "smoke needs a CEM teacher checkpoint; run "
+                    "scripts/train_cem.py --smoke first (or train the real cem_v1)."
+                )
+            args.checkpoint = str(ckpt)
     return args
 
 
@@ -288,7 +297,7 @@ def main(argv=None) -> int:
         console.print(f"[cyan]device[/cyan]: {device} (MPS not requested/available)")
 
     if args.smoke:
-        args.data_dir = _make_smoke_dataset(console)
+        args.data_dir = _make_smoke_dataset(console, args.checkpoint)
 
     ds_n = bc.BCDataset(args.data_dir)
     n_frames = len(ds_n)

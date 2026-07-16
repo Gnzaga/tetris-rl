@@ -25,8 +25,19 @@ from tetris.bc import (
 )
 from tetris.engine import PIECES
 from tetris.frame_env import FrameEnv
-from tetris.keypress_expert import ExpertPlayer, make_teacher
+from tetris.keypress_expert import (
+    ExpertPlayer,
+    make_teacher,
+    resolve_cem_checkpoint,
+)
 from tetris.render_obs import render_env
+
+# CEM teacher checkpoint (cem_v1 if trained, else cem_smoke); skip if neither.
+_CEM_CKPT = resolve_cem_checkpoint()
+pytestmark = pytest.mark.skipif(
+    _CEM_CKPT is None,
+    reason="no CEM teacher checkpoint (run scripts/train_cem.py [--smoke])",
+)
 
 
 # -- packing ---------------------------------------------------------------
@@ -34,7 +45,7 @@ from tetris.render_obs import render_env
 
 def test_pack_unpack_roundtrip():
     env = FrameEnv(seed=3)
-    player = ExpertPlayer(make_teacher("cem"))
+    player = ExpertPlayer(make_teacher("cem", _CEM_CKPT))
     player.reset(env)
     for _ in range(600):  # build a stack so the frame is non-trivial
         if env.game_over:
@@ -89,6 +100,7 @@ def tiny_dataset(tmp_path_factory):
         max_game_pieces=15,   # forces several short episodes
         base_seed=555000,
         teacher_kind="cem",
+        checkpoint=_CEM_CKPT,
         progress=False,
     )
     return out, meta
@@ -116,7 +128,7 @@ def test_frame_roundtrip_vs_replay(tiny_dataset):
     ds = BCDataset(out)
     start, length, seed, *_ = meta["episodes"][0]
     env = FrameEnv(seed=seed)
-    player = ExpertPlayer(make_teacher("cem"))
+    player = ExpertPlayer(make_teacher("cem", _CEM_CKPT))
     player.reset(env)
     i = start
     produced = 0
@@ -172,7 +184,7 @@ def test_linear_probe_recovers_heights():
     # the pixels the probe reads encode the stack (the active piece and stack are
     # deliberately indistinguishable in the render, which otherwise confounds a
     # pure stack-height readout). Full 96x96 pixels; held-out MAE. Runs in ~5s.
-    teacher = make_teacher("cem")
+    teacher = make_teacher("cem", _CEM_CKPT)
     player = ExpertPlayer(teacher)
     N = 10000
     X = np.empty((N, 96 * 96), dtype=np.float32)

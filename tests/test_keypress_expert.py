@@ -21,15 +21,24 @@ from tetris.keypress_expert import (
     make_teacher,
     naive_script,
     plan,
+    resolve_cem_checkpoint,
     simulate_script,
 )
 
 # Piece indices (shared/pieces.json order): I O T S Z J L
 I, O, T, S, Z, J, L = range(7)
 
+# CEM teacher checkpoint (cem_v1 if trained, else cem_smoke). Skip the module
+# when neither exists (fresh clone with no runs yet).
+_CEM_CKPT = resolve_cem_checkpoint()
+pytestmark = pytest.mark.skipif(
+    _CEM_CKPT is None,
+    reason="no CEM teacher checkpoint (run scripts/train_cem.py [--smoke])",
+)
+
 
 def _cem():
-    return make_teacher("cem")
+    return make_teacher("cem", _CEM_CKPT)
 
 
 def _drive_verify(seed, teacher, max_pieces):

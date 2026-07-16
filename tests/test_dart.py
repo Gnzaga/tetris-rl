@@ -29,16 +29,25 @@ from tetris.keypress_expert import (
     current_pose_script,
     make_teacher,
     relabel_action,
+    resolve_cem_checkpoint,
     simulate_script,
 )
 
 I, O, T, S, Z, J, L = range(7)
 
+# CEM teacher checkpoint (cem_v1 if trained, else cem_smoke); skip if neither.
+_CEM_CKPT = resolve_cem_checkpoint()
+pytestmark = pytest.mark.skipif(
+    _CEM_CKPT is None,
+    reason="no CEM teacher checkpoint (run scripts/train_cem.py [--smoke])",
+)
+
 
 def _gen(tmp_path, name, **kw):
     out = tmp_path / name
     args = dict(total_pieces=8, max_game_pieces=4, base_seed=555000,
-                noise_seed=11, teacher_kind="cem", progress=False)
+                noise_seed=11, teacher_kind="cem", checkpoint=_CEM_CKPT,
+                progress=False)
     args.update(kw)
     meta = generate_dart_dataset(out, **args)
     return out, meta
@@ -71,7 +80,7 @@ def test_dart_zero_noise_matches_relabeler_policy(tmp_path):
     # Replay the first episode: with p=0 the applied action IS the stored label,
     # so driving a fresh env with the stored labels must visit the same states
     # and the relabeler must reproduce every label.
-    teacher = make_teacher("cem")
+    teacher = make_teacher("cem", _CEM_CKPT)
     start, length, seed, *_ = meta["episodes"][0]
     env = FrameEnv(seed=seed)
     relab = DaggerRelabeler(teacher)
@@ -105,7 +114,7 @@ def test_recovery_state_label_matches_replan_first_action():
     # Empty board, I-piece mid-flight displaced 2 columns RIGHT of wherever the
     # replan wants it: the label must be the first action of the current-pose
     # replan script — a corrective press, never noop.
-    teacher = make_teacher("cem")
+    teacher = make_teacher("cem", _CEM_CKPT)
     env = FrameEnv(seed=0)
     env.rows = [0] * 20
     env.piece = I
