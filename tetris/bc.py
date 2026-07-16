@@ -233,6 +233,166 @@ def generate_dataset(
 
 
 # --------------------------------------------------------------------------
+# DART-style noise-injected generation (PLAN2.md §6 covariate-shift amendment)
+# --------------------------------------------------------------------------
+#
+# Plain BC + 2xDAgger provably fails closed-loop here (Phase D debug report:
+# agreement on self-visited states 0.25 despite 0.99 held-in accuracy). The
+# primary dataset is therefore collected DART-style: the behavior policy is the
+# current-pose replan relabeler (itself verified to score ~118 lines as a
+# policy) with per-decision noise injection — with probability p (drawn per
+# episode from DART_NOISE_LEVELS) the APPLIED action is replaced by a uniform
+# random one — while the stored LABEL is always the relabeler's action for the
+# visited state. Recovery states (piece off the optimal path) are thereby baked
+# into the base distribution with correct corrective labels. Labels remain
+# camera-faithful: the relabeler returns NOOP while the piece is not fully
+# visible (§4), even when noise displaced it up there.
+
+DART_NOISE_LEVELS = (0.05, 0.10, 0.20)
+
+
+def _play_dart_episode(relabeler, seed: int, noise_p: float, noise_rng,
+                       max_pieces: int, frames_f, actions: array,
+                       episode_ids: array, ep_index: int):
+    """One noise-injected relabeler-policy game, streamed like
+    :func:`_play_episode`. Returns (n_frames, lines, pieces, n_noised,
+    n_press_labels)."""
+    env = FrameEnv(seed=seed)
+    n = noised = presses = 0
+    while not env.game_over and env.pieces < max_pieces:
+        if env.is_decision_tick:
+            obs = render_env(env)  # what the agent sees, before it acts
+            frames_f.write(pack_obs(obs).tobytes())
+            label = relabeler.relabel(env)  # expert action for the CURRENT pose
+            actions.append(label)
+            episode_ids.append(ep_index)
+            if label != 0:
+                presses += 1
+            applied = label
+            if noise_rng.random() < noise_p:
+                applied = int(noise_rng.integers(0, NUM_ACTIONS))
+                noised += 1
+            env.apply_action(applied)
+            n += 1
+        env.tick()
+    return n, env.lines, env.pieces, noised, presses
+
+
+def generate_dart_dataset(
+    out_dir: str | Path,
+    total_pieces: int = 25000,
+    max_game_pieces: int = 1000,
+    base_seed: int = 200000,
+    noise_seed: int = 7,
+    noise_levels: tuple = DART_NOISE_LEVELS,
+    teacher_kind: str = "td",
+    checkpoint=None,
+    device: str = "cpu",
+    progress: bool = True,
+) -> dict:
+    """Generate the DART noise-injected demonstration dataset (block comment
+    above). Same on-disk format as :func:`generate_dataset` (readable by
+    :class:`BCDataset`); fully deterministic given the arguments — episode seeds
+    are ``base_seed + ep`` and all noise draws come from a single
+    ``np.random.default_rng(noise_seed)`` stream consumed in episode order."""
+    import time
+
+    from tetris.keypress_expert import DaggerRelabeler
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    frames_path = out_dir / "frames.u8pack"
+
+    teacher = make_teacher(teacher_kind, checkpoint, device)
+    noise_rng = np.random.default_rng(noise_seed)
+
+    actions = array("B")
+    episode_ids = array("i")
+    episodes = []  # (start, length, seed, lines, pieces, noise_p, n_noised)
+
+    n = 0
+    pieces_total = 0
+    press_total = 0
+    ep = 0
+    t0 = time.perf_counter()
+    with open(frames_path, "wb", buffering=1 << 20) as frames_f:
+        while pieces_total < total_pieces:
+            seed = base_seed + ep
+            p = float(noise_levels[int(noise_rng.integers(len(noise_levels)))])
+            start = n
+            cnt, lines, pieces, noised, presses = _play_dart_episode(
+                DaggerRelabeler(teacher), seed, p, noise_rng,
+                max_game_pieces, frames_f, actions, episode_ids, ep,
+            )
+            episodes.append((start, cnt, seed, int(lines), int(pieces), p, noised))
+            n += cnt
+            pieces_total += pieces
+            press_total += presses
+            ep += 1
+            if progress:
+                el = time.perf_counter() - t0
+                print(
+                    f"dart ep {ep:>3} seed={seed} p={p:.2f} pieces={pieces:>5} "
+                    f"lines={lines:>6} frames={cnt:>6} noised={noised:>5} | "
+                    f"total: {pieces_total:>6}/{total_pieces} pieces, {n:>8} frames, "
+                    f"press_frac={press_total / max(n, 1):.4f}, {el:6.1f}s "
+                    f"({n / max(el, 1e-9):.0f} f/s)",
+                    flush=True,
+                )
+    elapsed = time.perf_counter() - t0
+
+    actions_arr = np.frombuffer(actions, dtype=np.uint8).copy()
+    episode_arr = np.frombuffer(episode_ids, dtype=np.int32).copy()
+    np.save(out_dir / "actions.npy", actions_arr)
+    np.save(out_dir / "episode_id.npy", episode_arr)
+
+    hist = class_histogram(actions_arr)
+    meta = {
+        "n_frames": int(n),
+        "n_episodes": int(ep),
+        "total_pieces": int(pieces_total),
+        "total_lines": int(sum(e[3] for e in episodes)),
+        "obs_size": OBS_SIZE,
+        "packed_bytes": PACKED_BYTES,
+        "num_actions": NUM_ACTIONS,
+        "actions": list(ACTIONS),
+        "source": "dart",
+        "behavior_policy": "current-pose replan relabeler + uniform noise",
+        "noise_levels": list(noise_levels),
+        "noise_seed": noise_seed,
+        "teacher": teacher_kind,
+        "base_seed": base_seed,
+        "max_game_pieces": max_game_pieces,
+        "packing": "np.packbits(obs.reshape(-1) != 0), MSB-first, 1152 bytes/frame",
+        "stack_rule": (
+            "4-stack for frame i in episode starting s = "
+            "[max(i-3,s), max(i-2,s), max(i-1,s), i]; episode-start frames repeat"
+        ),
+        "class_histogram": {ACTIONS[a]: int(hist[a]) for a in range(NUM_ACTIONS)},
+        "class_fractions": {
+            ACTIONS[a]: (float(hist[a] / n) if n else 0.0) for a in range(NUM_ACTIONS)
+        },
+        "press_fraction": float((n - hist[0]) / n) if n else 0.0,
+        "elapsed_s": round(elapsed, 2),
+        "episodes": episodes,
+        "files": {
+            "frames": "frames.u8pack",
+            "actions": "actions.npy",
+            "episode_id": "episode_id.npy",
+        },
+    }
+    with open(out_dir / "meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+
+    if progress:
+        print(f"\nDART DONE: {n} frames, {ep} episodes, {pieces_total} pieces, "
+              f"{meta['total_lines']} lines in {elapsed:.1f}s; "
+              f"press_fraction={meta['press_fraction']:.4f}")
+        print("class histogram:", meta["class_histogram"])
+    return meta
+
+
+# --------------------------------------------------------------------------
 # Dataset reader (used by Phase C tests and, later, Phase D training)
 # --------------------------------------------------------------------------
 
@@ -425,6 +585,38 @@ def balanced_batches(dataset, batch_size: int, total_steps: int,
             pool[rng.integers(0, len(pool), size=base + (1 if j < rem else 0))]
             for j, pool in enumerate(present)
         ]
+        idx = np.concatenate(parts)
+        rng.shuffle(idx)
+        yield dataset.batch_stacks(idx), actions[idx].astype(np.int64)
+
+
+def noop_press_batches(dataset, batch_size: int, total_steps: int,
+                       rng: np.random.Generator):
+    """50/50 noop/press batch stream (PLAN2.md §6 covariate-shift amendment).
+
+    Yields exactly ``total_steps`` ``(stacks[B,4,96,96] f32, labels[B] int64)``
+    batches: half of each batch is drawn from the noop pool, the other half
+    uniformly across the PRESS classes present in ``dataset`` (remainder spread
+    one-per-class). Softer than the 5-way-uniform :func:`balanced_batches` —
+    that inflated press priors ~4x over noop and caused false-press thrashing
+    in closed loop. Per-class draws are WITH replacement; loss stays UNWEIGHTED
+    cross-entropy (the balance lives in the sampler)."""
+    actions = np.asarray(dataset.actions)
+    noop_pool = np.flatnonzero(actions == 0)
+    press_pools = [p for p in (np.flatnonzero(actions == a)
+                               for a in range(1, NUM_ACTIONS)) if len(p)]
+    if not len(noop_pool) or not press_pools:
+        # Degenerate corpus (single side only): fall back to uniform-over-present.
+        yield from balanced_batches(dataset, batch_size, total_steps, rng)
+        return
+    n_noop = batch_size // 2
+    k = len(press_pools)
+    base, rem = divmod(batch_size - n_noop, k)
+    for _ in range(total_steps):
+        parts = [noop_pool[rng.integers(0, len(noop_pool), size=n_noop)]]
+        for j, pool in enumerate(press_pools):
+            parts.append(pool[rng.integers(0, len(pool),
+                                           size=base + (1 if j < rem else 0))])
         idx = np.concatenate(parts)
         rng.shuffle(idx)
         yield dataset.batch_stacks(idx), actions[idx].astype(np.int64)
@@ -646,7 +838,7 @@ def write_dagger_dataset(out_dir: str | Path, roll: dict) -> Path:
 def main(argv=None) -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(description="Generate the BC dataset (PLAN2.md §5)")
+    ap = argparse.ArgumentParser(description="Generate the BC dataset (PLAN2.md §5/§6)")
     ap.add_argument("--out", default=str(DEFAULT_DATA_DIR))
     ap.add_argument("--pieces", type=int, default=25000, help="target total pieces")
     ap.add_argument("--max-game-pieces", type=int, default=1000)
@@ -654,7 +846,23 @@ def main(argv=None) -> int:
     ap.add_argument("--teacher", choices=["td", "cem"], default="td")
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--dart", action="store_true",
+                    help="DART noise-injected generation (§6 amendment)")
+    ap.add_argument("--noise-seed", type=int, default=7)
     args = ap.parse_args(argv)
+
+    if args.dart:
+        generate_dart_dataset(
+            out_dir=args.out,
+            total_pieces=args.pieces,
+            max_game_pieces=args.max_game_pieces,
+            base_seed=args.base_seed,
+            noise_seed=args.noise_seed,
+            teacher_kind=args.teacher,
+            checkpoint=args.checkpoint,
+            device=args.device,
+        )
+        return 0
 
     generate_dataset(
         out_dir=args.out,

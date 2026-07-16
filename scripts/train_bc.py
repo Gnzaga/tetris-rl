@@ -1,9 +1,10 @@
 """BC + DAgger driver for the pixel-input keypress policy (PLAN2.md §6, Phase D).
 
 Trains :class:`tetris.policy_model.PolicyNet` by behavioral cloning on the
-keypress-expert corpus (``runs/bc_data_v1``) with CLASS-BALANCED batch sampling
-and unweighted cross-entropy (§6 amendment; the step budget is "epochs' worth"
-— ``epochs * ceil(n/batch)`` — see ``tetris.bc.balanced_batches``), then runs
+DART noise-injected corpus (``runs/bc_data_v2``, §6 covariate-shift amendment)
+with 50/50 NOOP/PRESS batch sampling and unweighted cross-entropy (the step
+budget is "epochs' worth" — ``epochs * ceil(n/batch)`` — see
+``tetris.bc.noop_press_batches``), then runs
 DAgger: roll out the student, relabel every visited decision frame with the
 expert's CURRENT-POSE action, aggregate, and continue training. Closed-loop
 greedy eval (20 real-time games, seeds 950000+, 10k-piece cap) runs every
@@ -58,9 +59,10 @@ def _build_config(args, device, total_steps, n_frames) -> dict:
         "total_optimizer_steps": total_steps,
         "dagger_iters": args.dagger_iters,
         "dagger_frames": args.dagger_frames,
-        "sampler": "class-balanced batches (~uniform over present classes, "
-                   "per-class draw with replacement), UNWEIGHTED cross-entropy "
-                   "(PLAN2.md §6 amendment); steps = epochs * ceil(n/batch)",
+        "sampler": "50/50 noop/press batches (presses ~uniform among present "
+                   "press classes, per-class draw with replacement), UNWEIGHTED "
+                   "cross-entropy (PLAN2.md §6 covariate-shift amendment); "
+                   "steps = epochs * ceil(n/batch)",
         "dagger_retrain_epochs": 1,
         "dagger_aggregation": "base + all dagger shards, balanced-sampled for 1 "
                               "epoch's worth of steps, continues optimizer state",
@@ -136,7 +138,7 @@ def train(run, cfg, args, console) -> dict:
     loss_sum = loss_cnt = 0
     t_last = time.perf_counter()
     seen_last = 0
-    for stacks, labels in bc.balanced_batches(dataset, cfg["batch_size"], total, rng):
+    for stacks, labels in bc.noop_press_batches(dataset, cfg["batch_size"], total, rng):
         loss = bc.train_step(model, optimizer, stacks, labels, device)
         step += 1
         loss_sum += loss
@@ -183,8 +185,8 @@ def train(run, cfg, args, console) -> dict:
         console.print(f"  relabeled {roll['n_frames']:,} frames in {roll['elapsed_s']}s; "
                       f"combined = {len(combined):,} frames; retrain 1 epoch's worth "
                       f"= {retrain_steps:,} balanced steps")
-        for stacks, labels in bc.balanced_batches(combined, cfg["batch_size"],
-                                                  retrain_steps, rng):
+        for stacks, labels in bc.noop_press_batches(combined, cfg["batch_size"],
+                                                    retrain_steps, rng):
             loss = bc.train_step(model, optimizer, stacks, labels, device)
             step += 1
         ev, pc = _do_eval(run, model, cfg, step, "dagger", loss, 0.0, combined, rng, console)
