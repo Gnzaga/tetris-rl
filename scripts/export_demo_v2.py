@@ -234,6 +234,7 @@ def add_pixel_agents(
         1: "PixelNet — DAgger final (shipped; best-effort, median 0 lines, ~25 pieces)",
     }
     final_pixel_id = None
+    final_ckpt: Path | None = None
     for k in (0, 1):
         ckpt = bc_dir / "checkpoints" / f"nn_dagger_{k}.pt"
         if not ckpt.exists():
@@ -251,11 +252,13 @@ def add_pixel_agents(
         ))
         final_onnx = out_dir / onnx_name
         final_pixel_id = pid
+        final_ckpt = ckpt
 
     if final_onnx is None:
         # No DAgger checkpoints: fall back to the 100% BC milestone as final.
         final_pixel_id = "pixel_nn_100"
         final_onnx = out_dir / "pixel_nn_100.onnx"
+        final_ckpt = bc_dir / "checkpoints" / f"{milestones['100']['checkpoint']}.pt"
 
     # Optional PPO arm — only if its final checkpoint already exists.
     ppo_included = False
@@ -278,10 +281,9 @@ def add_pixel_agents(
         _log(f"  (ppo arm omitted — {ppo_final} not present yet)")
 
     # FC->action weight matrix (5×256) + bias from the FINAL model, for the demo
-    # node-wire graph (edge brightness = |weight × activation|).
-    dagger1 = bc_dir / "checkpoints" / "nn_dagger_1.pt"
-    final_ckpt = dagger1 if dagger1.exists() else (
-        bc_dir / "checkpoints" / f"{milestones['100']['checkpoint']}.pt")
+    # node-wire graph (edge brightness = |weight × activation|). Derived from the
+    # SAME checkpoint as final_pixel_id/final_onnx above (last DAgger iter present,
+    # else the 100% BC milestone) so the weights and selftest never desync.
     final_model = load_policynet(final_ckpt)
     fc_w = final_model.pi.weight.detach().cpu().numpy().astype(np.float64)  # (5,256)
     fc_b = final_model.pi.bias.detach().cpu().numpy().astype(np.float64)    # (5,)

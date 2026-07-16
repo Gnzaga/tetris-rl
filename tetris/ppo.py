@@ -45,7 +45,7 @@ import torch.nn.functional as F
 
 from tetris.engine import CLEAR_POINTS
 from tetris.frame_env import DECISION_PERIOD, FrameEnv
-from tetris.policy_model import NUM_ACTIONS, OBS_SIZE
+from tetris.policy_model import OBS_SIZE
 from tetris.render_obs import render_env
 
 # Frozen PPO hyperparameters (PLAN2.md §7).

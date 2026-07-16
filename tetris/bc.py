@@ -9,11 +9,13 @@ Storage format (runs/bc_data_v1/ by default; runs/ is gitignored)
 ------------------------------------------------------------------
 The expert plays seeded frame-layer games; at every decision tick we store the
 96x96 observation the agent saw (rendered BEFORE its action) plus the action it
-chose. Observations are strictly binary (0 / 255), so each frame is bit-packed
-with :func:`numpy.packbits` to 1152 bytes (96*96 / 8) — an 8x saving over raw
-uint8 (which would be ~35 GB for ~3.8M frames). Files:
+chose. Observations take three values ({0, 128, 255}; §1 perception amendment),
+so each frame is bit-packed into TWO :func:`numpy.packbits` bitplanes — plane 0
+= "filled" (obs != 0), plane 1 = "bright" (obs == 255) — for 2304 bytes/frame
+(2 * 96*96 / 8), reconstructed as ``filled*128 + bright*127``. That is a ~4x
+saving over raw uint8 (which would be ~35 GB for ~3.8M frames). Files:
 
-* ``frames.u8pack`` : raw ``(N, 1152)`` uint8 memmap of packed frames.
+* ``frames.u8pack`` : raw ``(N, 2304)`` uint8 memmap of packed frames.
 * ``actions.npy``   : ``(N,)`` uint8 action labels (0..4).
 * ``episode_id.npy``: ``(N,)`` int32 episode index per frame.
 * ``meta.json``     : counts, per-episode table, class histogram + weights,
@@ -209,7 +211,10 @@ def generate_dataset(
         "teacher": teacher_kind,
         "base_seed": base_seed,
         "max_game_pieces": max_game_pieces,
-        "packing": "np.packbits(obs.reshape(-1) != 0), MSB-first, 1152 bytes/frame",
+        "packing": (
+            "two MSB-first bitplanes [filled = obs != 0 | bright = obs == 255], "
+            "2304 bytes/frame; reconstruct obs {0,128,255} as filled*128 + bright*127"
+        ),
         "stack_rule": (
             "4-stack for frame i in episode starting s = "
             "[max(i-3,s), max(i-2,s), max(i-1,s), i]; episode-start frames repeat"
@@ -382,7 +387,10 @@ def generate_dart_dataset(
         "teacher": teacher_kind,
         "base_seed": base_seed,
         "max_game_pieces": max_game_pieces,
-        "packing": "np.packbits(obs.reshape(-1) != 0), MSB-first, 1152 bytes/frame",
+        "packing": (
+            "two MSB-first bitplanes [filled = obs != 0 | bright = obs == 255], "
+            "2304 bytes/frame; reconstruct obs {0,128,255} as filled*128 + bright*127"
+        ),
         "stack_rule": (
             "4-stack for frame i in episode starting s = "
             "[max(i-3,s), max(i-2,s), max(i-1,s), i]; episode-start frames repeat"
@@ -451,7 +459,7 @@ class BCDataset:
         return self.n
 
     def frame(self, i: int) -> np.ndarray:
-        """(96,96) uint8 {0,255} observation at index ``i``."""
+        """(96,96) uint8 {0,128,255} observation at index ``i``."""
         return unpack_obs(self.frames[i])
 
     def stack_indices(self, i: int) -> list[int]:
