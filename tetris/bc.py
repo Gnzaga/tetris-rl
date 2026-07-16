@@ -274,6 +274,361 @@ class BCDataset:
         bits = np.unpackbits(self.frames[idx], axis=1)  # (4, 9216)
         return bits.astype(np.float32).reshape(4, OBS_SIZE, OBS_SIZE)
 
+    def batch_stacks(self, idx: np.ndarray) -> np.ndarray:
+        """Vectorized :meth:`stack` for a batch of indices -> (B,4,96,96) float32
+        in {0,1}. Reconstructs each 4-stack by index (episode-boundary safe) and
+        bit-unpacks all B*4 source frames in one numpy op — the BC training hot
+        path never touches per-sample python."""
+        idx = np.asarray(idx, dtype=np.int64)
+        s = self.ep_start[idx]
+        src = np.stack(
+            [np.maximum(idx - 3, s), np.maximum(idx - 2, s),
+             np.maximum(idx - 1, s), idx],
+            axis=1,
+        )  # (B, 4)
+        flat = src.reshape(-1)
+        bits = np.unpackbits(self.frames[flat], axis=1)  # (B*4, 9216)
+        return bits.astype(np.float32).reshape(len(idx), 4, OBS_SIZE, OBS_SIZE)
+
+
+# ==========================================================================
+# Phase D — BC + DAgger training / closed-loop policy eval (PLAN2.md §6)
+# ==========================================================================
+#
+# Everything below is the training half of this module. The dataset half above
+# is torch-free; these functions import torch lazily so `import tetris.bc` in a
+# torch-free context (e.g. CEM workers) stays cheap.
+#
+# Metrics-schema note (frozen `tetris.runio` METRICS_FIELDS): closed-loop line
+# stats go into metrics.jsonl via RunWriter.log; PER-CLASS ACCURACY is not a
+# schema field, so it is carried in each checkpoint's payload metadata (and
+# printed) instead — the schema stays frozen. For BC/DAgger the `pieces_trained`
+# metrics/TB x-axis carries the OPTIMIZER-STEP index (documented in config).
+
+import math
+import statistics
+from collections import deque
+
+from tetris.evaluation import p10
+from tetris.keypress_expert import DaggerRelabeler, make_teacher
+from tetris.policy_model import NUM_ACTIONS as _NPI  # noqa: F401  (== NUM_ACTIONS)
+from tetris.policy_model import PolicyNet
+
+EVAL_SEED_BASE = 950000  # closed-loop eval seeds (NOT the dataset seeds)
+
+
+# --------------------------------------------------------------------------
+# Device selection + MPS/CPU numeric parity
+# --------------------------------------------------------------------------
+
+
+def select_device(prefer: str = "mps") -> str:
+    """Return ``"mps"`` if requested and available, else ``"cpu"``."""
+    import torch
+
+    if prefer == "mps" and torch.backends.mps.is_available():
+        return "mps"
+    if prefer not in ("mps", "cpu"):
+        return prefer
+    return "cpu"
+
+
+def mps_cpu_max_logit_diff(model: "PolicyNet", device: str, seed: int = 0) -> float:
+    """Max abs difference between CPU and ``device`` policy logits on one random
+    batch (same weights). Returns 0.0 when ``device`` is cpu. Used by the smoke
+    gate to verify MPS numerics (< 1e-3) before trusting the accelerator."""
+    import torch
+
+    if device == "cpu":
+        return 0.0
+    g = torch.Generator().manual_seed(seed)
+    x = torch.rand(32, 4, OBS_SIZE, OBS_SIZE, generator=g)
+    cpu_model = PolicyNet()
+    cpu_model.load_state_dict(model.state_dict())
+    cpu_model.eval()
+    dev_model = PolicyNet().to(device)
+    dev_model.load_state_dict(model.state_dict())
+    dev_model.eval()
+    with torch.no_grad():
+        lc, _ = cpu_model(x)
+        ld, _ = dev_model(x.to(device))
+    return float((lc - ld.cpu()).abs().max().item())
+
+
+# --------------------------------------------------------------------------
+# Multi-dataset view (base corpus + DAgger relabels), same stack semantics
+# --------------------------------------------------------------------------
+
+
+class MultiBCDataset:
+    """Concatenated view over several :class:`BCDataset` shards. Global indices
+    map to (shard, local); 4-stacks are reconstructed WITHIN each shard so
+    episode boundaries are always respected. ``actions`` is the concatenated
+    label array; :meth:`batch_stacks` dispatches a batch of global indices to the
+    right shard(s)."""
+
+    def __init__(self, datasets: list[BCDataset]):
+        if not datasets:
+            raise ValueError("MultiBCDataset needs >= 1 shard")
+        self.datasets = datasets
+        self.lengths = [len(d) for d in datasets]
+        self.offsets = np.concatenate([[0], np.cumsum(self.lengths)]).astype(np.int64)
+        self.n = int(self.offsets[-1])
+        self.actions = np.concatenate([d.actions for d in datasets])
+
+    def __len__(self) -> int:
+        return self.n
+
+    def batch_stacks(self, idx: np.ndarray) -> np.ndarray:
+        idx = np.asarray(idx, dtype=np.int64)
+        out = np.empty((len(idx), 4, OBS_SIZE, OBS_SIZE), dtype=np.float32)
+        which = np.searchsorted(self.offsets, idx, side="right") - 1
+        for di, d in enumerate(self.datasets):
+            m = which == di
+            if m.any():
+                out[m] = d.batch_stacks(idx[m] - self.offsets[di])
+        return out
+
+
+# --------------------------------------------------------------------------
+# Training primitives
+# --------------------------------------------------------------------------
+
+
+def num_optimizer_steps(n: int, batch_size: int, epochs: int) -> int:
+    return epochs * math.ceil(n / batch_size)
+
+
+def iter_minibatches(dataset, batch_size: int, epochs: int, rng: np.random.Generator):
+    """Yield ``(epoch, stacks[B,4,96,96] f32, labels[B] int64)`` for ``epochs``
+    reshuffled passes over ``dataset`` (drop no tail; last batch may be short)."""
+    n = len(dataset)
+    for ep in range(epochs):
+        perm = rng.permutation(n)
+        for start in range(0, n, batch_size):
+            idx = perm[start:start + batch_size]
+            yield ep, dataset.batch_stacks(idx), dataset.actions[idx].astype(np.int64)
+
+
+def train_step(model, optimizer, stacks: np.ndarray, labels: np.ndarray,
+               weight, device: str) -> float:
+    """One class-weighted cross-entropy optimizer step; returns the scalar loss."""
+    import torch
+    import torch.nn.functional as F
+
+    model.train()
+    x = torch.from_numpy(stacks).to(device)
+    y = torch.from_numpy(labels).to(device)
+    logits, _ = model(x)
+    loss = F.cross_entropy(logits, y, weight=weight)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return float(loss.item())
+
+
+def weight_tensor(weights: np.ndarray, device: str):
+    import torch
+
+    return torch.tensor(np.asarray(weights, dtype=np.float32), device=device)
+
+
+def per_class_accuracy(model, dataset, device: str, n_samples: int,
+                       rng: np.random.Generator, chunk: int = 512) -> dict:
+    """Held-in per-class argmax accuracy over ``n_samples`` random frames. Not a
+    metrics-schema field — stored in checkpoint metadata / printed only."""
+    import torch
+
+    n = len(dataset)
+    n_samples = min(n_samples, n)
+    idx = rng.choice(n, size=n_samples, replace=False)
+    labels = dataset.actions[idx].astype(np.int64)
+    preds = np.empty(n_samples, dtype=np.int64)
+    model.eval()
+    with torch.no_grad():
+        for s in range(0, n_samples, chunk):
+            sl = slice(s, s + chunk)
+            x = torch.from_numpy(dataset.batch_stacks(idx[sl])).to(device)
+            logits, _ = model(x)
+            preds[sl] = logits.argmax(dim=1).cpu().numpy()
+    out = {}
+    for a in range(NUM_ACTIONS):
+        m = labels == a
+        tot = int(m.sum())
+        out[ACTIONS[a]] = (float((preds[m] == a).mean()) if tot else None)
+    out["overall"] = float((preds == labels).mean())
+    return out
+
+
+# --------------------------------------------------------------------------
+# Closed-loop policy eval (SHARED with Phase E PPO) — vectorized over games
+# --------------------------------------------------------------------------
+
+
+class PolicyEval:
+    __slots__ = ("lines", "pieces", "seeds", "moves", "median_lines",
+                 "mean_lines", "p10_lines", "mean_pieces", "best_index")
+
+    def __init__(self, lines, pieces, seeds, moves):
+        self.lines = lines
+        self.pieces = pieces
+        self.seeds = seeds
+        self.moves = moves
+        self.median_lines = float(statistics.median(lines)) if lines else 0.0
+        self.mean_lines = float(statistics.mean(lines)) if lines else 0.0
+        self.p10_lines = float(p10(lines)) if lines else 0.0
+        self.mean_pieces = float(statistics.mean(pieces)) if pieces else 0.0
+        self.best_index = int(np.argmax(lines)) if lines else 0
+
+
+def _greedy_actions(model, batch: np.ndarray, device: str) -> np.ndarray:
+    import torch
+
+    with torch.no_grad():
+        logits, _ = model(torch.from_numpy(batch).to(device))
+        return logits.argmax(dim=1).cpu().numpy()
+
+
+def evaluate_policy(model, seeds, max_pieces: int, device: str = "cpu") -> PolicyEval:
+    """Closed-loop greedy real-time eval over ``seeds`` (headless ticks, argmax
+    over logits at decision ticks). Games run in lockstep so their decision-tick
+    forwards batch into one call. Reused by BC, DAgger, and PPO evals."""
+    seeds = [int(s) for s in seeds]
+    n = len(seeds)
+    envs = [FrameEnv(seed=s) for s in seeds]
+    hist = [deque(maxlen=4) for _ in range(n)]
+    moves: list[list[list[int]]] = [[] for _ in range(n)]
+    done = [e.game_over or e.pieces >= max_pieces for e in envs]
+    model.eval()
+
+    while not all(done):
+        active = [i for i in range(n) if not done[i]]
+        if envs[active[0]].is_decision_tick:
+            batch = np.empty((len(active), 4, OBS_SIZE, OBS_SIZE), dtype=np.float32)
+            for bi, i in enumerate(active):
+                obs = render_env(envs[i])
+                h = hist[i]
+                if not h:
+                    for _ in range(4):
+                        h.append(obs)
+                else:
+                    h.append(obs)
+                batch[bi] = np.stack(h).astype(np.float32) / 255.0
+            acts = _greedy_actions(model, batch, device)
+            for bi, i in enumerate(active):
+                envs[i].apply_action(int(acts[bi]))
+        for i in active:
+            lock = envs[i].tick()
+            if lock is not None:
+                moves[i].append([lock["r"], lock["c"]])
+            if envs[i].game_over or envs[i].pieces >= max_pieces:
+                done[i] = True
+
+    return PolicyEval([e.lines for e in envs], [e.pieces for e in envs], seeds, moves)
+
+
+# --------------------------------------------------------------------------
+# DAgger — student rollout + expert relabel of every visited decision frame
+# --------------------------------------------------------------------------
+
+
+def dagger_rollout(model, teacher, target_frames: int, base_seed: int,
+                   device: str = "cpu", max_pieces: int = 10000,
+                   progress: bool = False) -> dict:
+    """Roll out the STUDENT (greedy argmax) on fresh seeds for ~``target_frames``
+    decision frames; relabel EVERY visited decision frame with the expert's
+    action for THAT state (current-pose replan, :class:`DaggerRelabeler`), which
+    a spawn-time script cannot do once the piece has moved. Returns packed
+    frames + relabels + an episodes table for :func:`write_dagger_dataset`."""
+    import torch  # noqa: F401  (device tensors created in _greedy_actions)
+
+    packed: list[np.ndarray] = []
+    actions = array("B")
+    ep_ids = array("i")
+    episodes = []
+    total = 0
+    ep = 0
+    import time
+    t0 = time.perf_counter()
+    while total < target_frames:
+        seed = base_seed + ep
+        env = FrameEnv(seed=seed)
+        relab = DaggerRelabeler(teacher)
+        h: deque = deque(maxlen=4)
+        start = total
+        while (not env.game_over and env.pieces < max_pieces
+               and total < target_frames):
+            if env.is_decision_tick:
+                obs = render_env(env)  # the state the student saw
+                if not h:
+                    for _ in range(4):
+                        h.append(obs)
+                else:
+                    h.append(obs)
+                stack = (np.stack(h).astype(np.float32) / 255.0)[None]
+                student_a = int(_greedy_actions(model, stack, device)[0])
+                label = relab.relabel(env)  # expert action for the CURRENT pose
+                packed.append(pack_obs(obs))
+                actions.append(label)
+                ep_ids.append(ep)
+                total += 1
+                env.apply_action(student_a)
+            env.tick()
+        episodes.append((start, total - start, seed, int(env.lines), int(env.pieces)))
+        ep += 1
+        if progress:
+            el = time.perf_counter() - t0
+            print(f"  dagger ep {ep:>3} seed={seed} lines={env.lines:>5} "
+                  f"pieces={env.pieces:>5} | frames {total:>7}/{target_frames} "
+                  f"{total / max(el, 1e-9):.0f}/s", flush=True)
+    return {
+        "packed": packed,
+        "actions": np.frombuffer(actions, dtype=np.uint8).copy(),
+        "episode_id": np.frombuffer(ep_ids, dtype=np.int32).copy(),
+        "episodes": episodes,
+        "n_frames": total,
+        "elapsed_s": round(time.perf_counter() - t0, 2),
+    }
+
+
+def write_dagger_dataset(out_dir: str | Path, roll: dict) -> Path:
+    """Persist a :func:`dagger_rollout` result in the on-disk BCDataset format so
+    it can be wrapped by :class:`BCDataset` and aggregated via
+    :class:`MultiBCDataset`."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    frames_arr = (np.stack(roll["packed"]).astype(np.uint8)
+                  if roll["packed"] else np.empty((0, PACKED_BYTES), np.uint8))
+    frames_arr.tofile(out_dir / "frames.u8pack")
+    np.save(out_dir / "actions.npy", roll["actions"])
+    np.save(out_dir / "episode_id.npy", roll["episode_id"])
+    hist = class_histogram(roll["actions"])
+    n = int(roll["n_frames"])
+    meta = {
+        "n_frames": n,
+        "n_episodes": len(roll["episodes"]),
+        "obs_size": OBS_SIZE,
+        "packed_bytes": PACKED_BYTES,
+        "num_actions": NUM_ACTIONS,
+        "actions": list(ACTIONS),
+        "source": "dagger_rollout",
+        "class_histogram": {ACTIONS[a]: int(hist[a]) for a in range(NUM_ACTIONS)},
+        "episodes": roll["episodes"],
+        "elapsed_s": roll.get("elapsed_s"),
+        "files": {"frames": "frames.u8pack", "actions": "actions.npy",
+                  "episode_id": "episode_id.npy"},
+    }
+    with open(out_dir / "meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    return out_dir
+
+
+def combined_class_weights(dataset) -> np.ndarray:
+    """Capped inverse-frequency weights recomputed over a (possibly multi-shard)
+    dataset's label distribution — DAgger shifts the class mix, so weights are
+    refreshed each retrain rather than reused from the base meta."""
+    return inverse_freq_weights(class_histogram(np.asarray(dataset.actions)))
+
 
 # --------------------------------------------------------------------------
 # CLI

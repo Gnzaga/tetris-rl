@@ -132,6 +132,105 @@ def naive_script(piece: int, target_rot: int, target_col: int) -> list[int]:
     return script
 
 
+def current_pose_script(piece: int, cur_rot: int, cur_col: int,
+                        target_rot: int, target_col: int) -> list[int]:
+    """Generalization of :func:`naive_script` to an ARBITRARY current pose:
+    the per-decision-tick action list that takes the piece from ``(cur_rot,
+    cur_col)`` to ``(target_rot, target_col)`` — all rotations first (shorter
+    direction, cw on a tie), replaying the frame layer's column clamp, then all
+    slides. Noops-until-lock are implicit (the driver emits ``NOOP`` once the
+    list is exhausted). At spawn (``cur_rot=0``, ``cur_col=spawn_col``) this
+    equals :func:`naive_script`.
+
+    This is the DAgger primitive: for a student-visited mid-flight state, the
+    expert re-plans from the CURRENT pose, so the correct label is the first
+    action of *this* script (a spawn-time script would mislabel it).
+    """
+    n = len(PIECES[piece])
+    cw = (target_rot - cur_rot) % n
+    ccw = (cur_rot - target_rot) % n
+    if cw <= ccw:
+        rot_action, count = ROT_CW, cw
+    else:
+        rot_action, count = ROT_CCW, ccw
+    script = [rot_action] * count
+
+    # Replay the rotation clamp from the current column to find the post-rotation
+    # column (mirrors FrameEnv._do_action's clamp; collisions are resolved by the
+    # forward-sim in the caller, not here).
+    col = cur_col
+    rot = cur_rot
+    for _ in range(count):
+        rot = (rot + 1) % n if rot_action == ROT_CW else (rot - 1) % n
+        w = PIECES[piece][rot].width
+        col = min(max(col, 0), WIDTH - w)
+
+    delta = target_col - col
+    slide_action = RIGHT if delta > 0 else LEFT
+    script += [slide_action] * abs(delta)
+    return script
+
+
+def relabel_action(env: FrameEnv, teacher) -> int:
+    """DAgger expert label for the CURRENT (possibly mid-flight) pose of ``env``.
+
+    Enumerates the current board's placements, scores them with ``teacher``, and
+    walks them high-score first; for each it builds the :func:`current_pose_script`
+    (rotations, slides, then waits) and forward-simulates it on a CLONE from the
+    current tick/gravity phase. The first placement that the current pose can
+    still reach at its exact ``(rot, col)`` straight-drop pose (``tuck=False``)
+    wins, and its script's FIRST action is returned as the label (``NOOP`` when
+    the script is empty — already positioned — or nothing is reachable).
+
+    ``env`` is never mutated. This is the correct DAgger relabel: it reflects
+    what the expert would press RIGHT NOW given where the student left the piece,
+    which a spawn-time script cannot express once the piece has moved.
+    """
+    return _DaggerRelabelCore(teacher).relabel(env)
+
+
+class _DaggerRelabelCore:
+    """Relabeler with an optional per-piece teacher-score cache.
+
+    The teacher score depends only on the board + active piece id, both constant
+    across a single piece's ~150 decision frames, so scoring once per piece and
+    reusing it across relabels is a ~150x saving on the neural forward. Only the
+    cheap current-pose reachability forward-sim runs per frame. Reset per game."""
+
+    __slots__ = ("teacher", "_pieces", "_placements", "_order")
+
+    def __init__(self, teacher):
+        self.teacher = teacher
+        self.reset()
+
+    def reset(self) -> None:
+        self._pieces = None
+        self._placements: list | None = None
+        self._order = None
+
+    def relabel(self, env: FrameEnv) -> int:
+        if self._placements is None or env.pieces != self._pieces:
+            scored = self.teacher.scores(_placement_engine(env))
+            self._pieces = env.pieces
+            if scored is None:
+                self._placements, self._order = [], []
+            else:
+                self._placements, scores = scored
+                self._order = np.argsort(-scores, kind="stable")
+        for idx in self._order:
+            rot, col = self._placements[int(idx)]
+            script = current_pose_script(env.piece, env.rot, env.col, rot, col)
+            lock = simulate_script(clone_env(env), script)
+            if (lock is not None and lock["r"] == rot and lock["c"] == col
+                    and not lock["tuck"]):
+                return script[0] if script else NOOP
+        return NOOP
+
+
+class DaggerRelabeler(_DaggerRelabelCore):
+    """Public per-game relabeler (see :class:`_DaggerRelabelCore`)."""
+
+
 def simulate_script(env: FrameEnv, script: list[int]) -> dict | None:
     """Forward-simulate ``script`` on ``env`` (mutated; pass a clone) exactly as
     the real driver would: one action per decision tick starting at the current
