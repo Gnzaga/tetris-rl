@@ -33,6 +33,18 @@ export const ACTION_TO_KEY = {
   [ROT_CCW]: "down",
 };
 
+// Apply an optional per-class logit bias (log-prior calibration) to a logits
+// array, returning a NEW array. bias is a length-5 array (scale*log(natural
+// prior)); null/undefined is a no-op. Adding it before argmax recovers a
+// natural-posterior-like decision boundary from a balanced-sampler policy — it
+// suppresses the rare-press false positives that make the agent "spam buttons".
+export function applyLogitBias(logits, bias) {
+  if (!bias) return logits.slice();
+  const out = new Array(logits.length);
+  for (let i = 0; i < logits.length; i++) out[i] = logits[i] + (bias[i] ?? 0);
+  return out;
+}
+
 // argmax with first-maximal tie-break — matches numpy argmax / the Python
 // greedy policy (bc.py `_greedy_actions`).
 export function argmaxLogits(logits) {
@@ -88,7 +100,17 @@ export function parsePixelManifest(manifest) {
     fcWeight: pa.fc_action_weight || null,
     fcBias: pa.fc_action_bias || null,
     selftest: pa.selftest_pixel || null,
+    // Calibration: the chosen default agent may carry a per-class `logit_bias`
+    // (5 floats). `calibratedDefault` says whether the demo toggle starts ON.
+    calibratedDefault: pa.calibrated_default != null ? !!pa.calibrated_default : false,
   };
+}
+
+// A pixel agent's logit_bias (5 floats) or null. Lives on the manifest agent
+// object so different iterations can carry different calibrations.
+export function agentLogitBias(agent) {
+  return (agent && Array.isArray(agent.logit_bias) && agent.logit_bias.length === 5)
+    ? agent.logit_bias : null;
 }
 
 // ---- ORT-backed inference (browser) ---------------------------------------
@@ -103,12 +125,15 @@ export class PixelAgent {
     this.params = 0; // filled by caller if wanted
   }
 
-  // stack: Float32Array(4*96*96). Returns { action, logits, activations, aux }.
-  async infer(stack) {
+  // stack: Float32Array(4*96*96). `logitBias` (optional length-5) is added to the
+  // logits before argmax (log-prior calibration). Returns { action, logits,
+  // rawLogits, calibrated, activations, aux }.
+  async infer(stack, logitBias = null) {
     const tensor = new this.ort.Tensor("float32", stack, [1, STACK, OBS_SIZE, OBS_SIZE]);
     const out = await this.session.run({ [this.inputName]: tensor });
     const get = (n) => out[n];
-    const logits = Array.from(get("logits").data);
+    const rawLogits = Array.from(get("logits").data);
+    const logits = applyLogitBias(rawLogits, logitBias);
     const action = argmaxLogits(logits);
     const activations = {};
     for (const name of this.meta.activationOutputs) {
@@ -127,7 +152,7 @@ export class PixelAgent {
       rot: out.aux_rot ? argmaxLogits(Array.from(out.aux_rot.data)) : null,
       col: out.aux_col ? argmaxLogits(Array.from(out.aux_col.data)) : null,
     };
-    return { action, logits, activations, aux };
+    return { action, logits, rawLogits, calibrated: !!logitBias, activations, aux };
   }
 }
 
@@ -153,6 +178,11 @@ export class PixelController {
     this.lastResult = null;   // { action, logits, activations, aux }
     this.lastDecisionMs = 0;
     this.decisions = 0;
+    // Log-prior calibration: `logitBias` (length-5) is applied before argmax
+    // when `calibrated` is on (the "calibrated presses" demo toggle). Set by
+    // main.js from the selected agent's manifest `logit_bias`.
+    this.logitBias = hooks.logitBias || null;
+    this.calibrated = hooks.calibrated != null ? !!hooks.calibrated : false;
   }
 
   async begin() {
@@ -169,7 +199,8 @@ export class PixelController {
     this.lastObs = obs;
     const stack = stackToTensor(this.history);
     const t0 = performance.now();
-    const res = await this.agent.infer(stack);
+    const bias = this.calibrated ? this.logitBias : null;
+    const res = await this.agent.infer(stack, bias);
     this.lastDecisionMs = performance.now() - t0;
     this.lastResult = res;
     this.pendingAction = res.action;

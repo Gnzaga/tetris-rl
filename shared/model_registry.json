@@ -1,0 +1,311 @@
+{
+  "schema_version": 1,
+  "generated": "2026-07-16T21:01:46+00:00",
+  "note": "Committed INDEX of the model registry (durable across clones). The checkpoint WEIGHTS are local-only: `checkpoint` paths reference the gitignored runs/ (and runs/archive/) trees. Regenerate weights locally or re-run scripts/registry.py to refresh eval numbers.",
+  "entries": [
+    {
+      "id": "v1_td_v1_final",
+      "created": "2026-07-16T04:46:48+00:00",
+      "family": "v1-valuenet",
+      "summary": "v1 TD(0) afterstate ValueNet \u2014 final (2M placements)",
+      "git_commit": "e3cbe13baf93793d6713acd10857f5e69c27421b",
+      "checkpoint": "runs/td_v1/checkpoints/nn_step_2000000.pt",
+      "domain": "board-int",
+      "eval": {
+        "median_lines": 3997.0,
+        "mean_lines": 3976.55,
+        "pieces_per_game": 9950.2,
+        "presses_per_piece": null,
+        "press_frac": null,
+        "thrash": null,
+        "source": "historical-metrics"
+      },
+      "notes": "v1 board-tensor planner (immortal at level-0); the honest contrast the pixel agents are measured against. Not a keypress policy."
+    },
+    {
+      "id": "pixel_attempt1_bc",
+      "created": "2026-07-16T16:03:26+00:00",
+      "family": "pixel-bc",
+      "summary": "Attempt 1 \u2014 plain BC (5-way balanced), BC-only final",
+      "git_commit": "fa13766dc0d9191f039d916ee8d98731014a5cd4",
+      "checkpoint": "runs/archive/attempt1_plain_bc/checkpoints/nn_step_58500.pt",
+      "domain": "camouflage-255",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.0,
+        "pieces_per_game": 21.05,
+        "presses_per_piece": null,
+        "press_frac": null,
+        "thrash": null,
+        "source": "historical-metrics"
+      },
+      "notes": "Camouflage render (active piece 255). Covariate-shift wall: 0.25 agreement on self-visited states, press recall ~1% off-manifold."
+    },
+    {
+      "id": "pixel_attempt1_dagger",
+      "created": "2026-07-16T16:13:00+00:00",
+      "family": "pixel-bc",
+      "summary": "Attempt 1 \u2014 + 2 DAgger iters (final)",
+      "git_commit": "fa13766dc0d9191f039d916ee8d98731014a5cd4",
+      "checkpoint": "runs/archive/attempt1_plain_bc/checkpoints/nn_dagger_1.pt",
+      "domain": "camouflage-255",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.05,
+        "pieces_per_game": 21.25,
+        "presses_per_piece": null,
+        "press_frac": null,
+        "thrash": null,
+        "source": "historical-metrics"
+      },
+      "notes": "DAgger shifted the policy toward thrash (false-press 25% vs BC-only 2.3%) without teaching recovery \u2014 median stayed 0."
+    },
+    {
+      "id": "mini_bc",
+      "created": "2026-07-16T16:50:00+00:00",
+      "family": "mini-experiment",
+      "summary": "Mini \u2014 DART pilot 8k steps (consecutive 4-stack)",
+      "git_commit": "97abd02d64b1d37883af8611aacb9689ea257a24",
+      "checkpoint": "runs/archive/minis/mini_bc.pt",
+      "domain": "camouflage-255",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.33,
+        "pieces_per_game": 23.3,
+        "presses_per_piece": null,
+        "press_frac": null,
+        "thrash": null,
+        "source": "historical-metrics"
+      },
+      "notes": "8k-step DART pilot (291k frames). Cleared the FIRST line ever seen from any pixel checkpoint (games [0,0,1]); prompted the full attempt 3."
+    },
+    {
+      "id": "pixel_attempt3_bc",
+      "created": "2026-07-16T17:06:02+00:00",
+      "family": "pixel-bc",
+      "summary": "Attempt 3 \u2014 DART + 50/50 sampler, BC-only final",
+      "git_commit": "97abd02d64b1d37883af8611aacb9689ea257a24",
+      "checkpoint": "runs/archive/attempt3_dart/checkpoints/nn_step_46568.pt",
+      "domain": "camouflage-255",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.0,
+        "pieces_per_game": 25.55,
+        "presses_per_piece": null,
+        "press_frac": null,
+        "thrash": null,
+        "source": "historical-metrics"
+      },
+      "notes": "DART recovery states baked into 3M frames; survival improved (21->26 pieces) but line-clearing stayed ~0. State coverage fixed, precision not."
+    },
+    {
+      "id": "pixel_attempt3_dagger",
+      "created": "2026-07-16T17:16:00+00:00",
+      "family": "pixel-bc",
+      "summary": "Attempt 3 \u2014 + 2 DAgger iters (final)",
+      "git_commit": "97abd02d64b1d37883af8611aacb9689ea257a24",
+      "checkpoint": "runs/archive/attempt3_dart/checkpoints/nn_dagger_1.pt",
+      "domain": "camouflage-255",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.1,
+        "pieces_per_game": 27.15,
+        "presses_per_piece": null,
+        "press_frac": null,
+        "thrash": null,
+        "source": "historical-metrics"
+      },
+      "notes": "Longest-surviving camouflage-render agent (~27 pieces); still median 0."
+    },
+    {
+      "id": "mini_spaced",
+      "created": "2026-07-16T17:30:00+00:00",
+      "family": "mini-experiment",
+      "summary": "Mini \u2014 spaced stack {t,t-4,t-8,t-12} 8k steps",
+      "git_commit": "8897a14",
+      "checkpoint": "runs/archive/minis/mini_spaced.pt",
+      "domain": "camouflage-255",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.0,
+        "pieces_per_game": null,
+        "presses_per_piece": null,
+        "press_frac": null,
+        "thrash": null,
+        "source": "historical-metrics"
+      },
+      "notes": "Attempt-4 motion-visibility probe. Stopped at the mini gate: off-manifold press recall 2.41x (<3x bar); rot_cw held-in recall dropped to 0.385."
+    },
+    {
+      "id": "mini_gray_noaux",
+      "created": "2026-07-16T17:50:00+00:00",
+      "family": "mini-experiment",
+      "summary": "Mini \u2014 gray-128 render, no aux head 8k steps",
+      "git_commit": "9e97bc3",
+      "checkpoint": "runs/archive/minis/mini_gray_noaux.pt",
+      "domain": "gray-128",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.0,
+        "pieces_per_game": null,
+        "presses_per_piece": null,
+        "press_frac": null,
+        "thrash": null,
+        "source": "historical-metrics"
+      },
+      "notes": "Attempt-5 ablation. Off-manifold press recall only 1.28x with the piece made unambiguous \u2014 refuted perception as the binding constraint."
+    },
+    {
+      "id": "mini_gray",
+      "created": "2026-07-16T17:55:00+00:00",
+      "family": "mini-experiment",
+      "summary": "Mini \u2014 gray-128 render + aux(0.5) head 8k steps",
+      "git_commit": "9e97bc3",
+      "checkpoint": "runs/archive/minis/mini_gray.pt",
+      "domain": "gray-128",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.0,
+        "pieces_per_game": null,
+        "presses_per_piece": null,
+        "press_frac": null,
+        "thrash": null,
+        "source": "historical-metrics"
+      },
+      "notes": "Aux(0.5) crowded out the sparse action signal at the 8k budget (recall 0.27x). Aux weight lowered to 0.1 for the shipped run."
+    },
+    {
+      "id": "pixel_bc_v2_000",
+      "created": "2026-07-16T18:13:32+00:00",
+      "family": "pixel-bc",
+      "summary": "bc_v2 \u2014 BC 0% (untrained net)",
+      "git_commit": "b8b55761d809a9a2dad161eb926661ba6621e53d",
+      "checkpoint": "runs/bc_v2/checkpoints/nn_step_0.pt",
+      "domain": "gray-128",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.0,
+        "pieces_per_game": 11.1,
+        "presses_per_piece": 97.11711711711712,
+        "press_frac": 1.0,
+        "thrash": 0.0,
+        "source": "fresh-eval"
+      },
+      "notes": "Shipped best-effort pixel agent (gray-128 render + aux 0.1). Fresh 20-game closed-loop eval, current renderer."
+    },
+    {
+      "id": "pixel_bc_v2_025",
+      "created": "2026-07-16T18:23:00+00:00",
+      "family": "pixel-bc",
+      "summary": "bc_v2 \u2014 BC 25%",
+      "git_commit": "b8b55761d809a9a2dad161eb926661ba6621e53d",
+      "checkpoint": "runs/bc_v2/checkpoints/nn_step_11642.pt",
+      "domain": "gray-128",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.0,
+        "pieces_per_game": 21.5,
+        "presses_per_piece": 5.213953488372093,
+        "press_frac": 0.05433307483520745,
+        "thrash": 0.11953612845673506,
+        "source": "fresh-eval"
+      },
+      "notes": "Shipped best-effort pixel agent (gray-128 render + aux 0.1). Fresh 20-game closed-loop eval, current renderer."
+    },
+    {
+      "id": "pixel_bc_v2_050",
+      "created": "2026-07-16T18:33:00+00:00",
+      "family": "pixel-bc",
+      "summary": "bc_v2 \u2014 BC 50%",
+      "git_commit": "b8b55761d809a9a2dad161eb926661ba6621e53d",
+      "checkpoint": "runs/bc_v2/checkpoints/nn_step_23284.pt",
+      "domain": "gray-128",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.0,
+        "pieces_per_game": 20.0,
+        "presses_per_piece": 7.235,
+        "press_frac": 0.07095919968615143,
+        "thrash": 0.26675881133379403,
+        "source": "fresh-eval"
+      },
+      "notes": "Shipped best-effort pixel agent (gray-128 render + aux 0.1). Fresh 20-game closed-loop eval, current renderer."
+    },
+    {
+      "id": "pixel_bc_v2_100",
+      "created": "2026-07-16T18:43:00+00:00",
+      "family": "pixel-bc",
+      "summary": "bc_v2 \u2014 BC 100% (final)",
+      "git_commit": "b8b55761d809a9a2dad161eb926661ba6621e53d",
+      "checkpoint": "runs/bc_v2/checkpoints/nn_step_46568.pt",
+      "domain": "gray-128",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.0,
+        "pieces_per_game": 23.85,
+        "presses_per_piece": 7.614255765199162,
+        "press_frac": 0.07862833391063388,
+        "thrash": 0.37362334801762115,
+        "source": "fresh-eval"
+      },
+      "notes": "Shipped best-effort pixel agent (gray-128 render + aux 0.1). Fresh 20-game closed-loop eval, current renderer."
+    },
+    {
+      "id": "pixel_bc_v2_dagger0",
+      "created": "2026-07-16T18:47:00+00:00",
+      "family": "pixel-bc",
+      "summary": "bc_v2 \u2014 DAgger iter 1",
+      "git_commit": "b8b55761d809a9a2dad161eb926661ba6621e53d",
+      "checkpoint": "runs/bc_v2/checkpoints/nn_dagger_0.pt",
+      "domain": "gray-128",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.15,
+        "pieces_per_game": 25.35,
+        "presses_per_piece": 24.631163708086785,
+        "press_frac": 0.23526752072343632,
+        "thrash": 0.5228219090326713,
+        "source": "fresh-eval"
+      },
+      "notes": "Shipped best-effort pixel agent (gray-128 render + aux 0.1). Fresh 20-game closed-loop eval, current renderer."
+    },
+    {
+      "id": "pixel_bc_v2_dagger1",
+      "created": "2026-07-16T18:53:00+00:00",
+      "family": "pixel-bc",
+      "summary": "bc_v2 \u2014 DAgger final (shipped)",
+      "git_commit": "b8b55761d809a9a2dad161eb926661ba6621e53d",
+      "checkpoint": "runs/bc_v2/checkpoints/nn_dagger_1.pt",
+      "domain": "gray-128",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.1,
+        "pieces_per_game": 25.55,
+        "presses_per_piece": 30.47945205479452,
+        "press_frac": 0.2938679245283019,
+        "thrash": 0.5054895666131621,
+        "source": "fresh-eval"
+      },
+      "notes": "Shipped best-effort pixel agent (gray-128 render + aux 0.1). Fresh 20-game closed-loop eval, current renderer."
+    },
+    {
+      "id": "pixel_ppo_v2_final",
+      "created": "2026-07-16T18:54:46+00:00",
+      "family": "pixel-ppo",
+      "summary": "ppo_v2 \u2014 pure PPO from scratch (time-boxed contrast)",
+      "git_commit": "b8b55761d809a9a2dad161eb926661ba6621e53d",
+      "checkpoint": "runs/ppo_v2/checkpoints/nn_final.pt",
+      "domain": "gray-128",
+      "eval": {
+        "median_lines": 0.0,
+        "mean_lines": 0.05,
+        "pieces_per_game": 24.1,
+        "presses_per_piece": 68.72821576763485,
+        "press_frac": 0.7292840789010215,
+        "thrash": 0.12358499109487729,
+        "source": "fresh-eval"
+      },
+      "notes": "5M frames, no BC init. The honest pure-RL contrast: near-zero lines."
+    }
+  ]
+}

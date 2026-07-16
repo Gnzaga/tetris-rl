@@ -27,6 +27,7 @@ import {
   parsePixelManifest,
   stackToTensor,
   ACTION_TO_KEY,
+  agentLogitBias,
 } from "./pixel_agent.js";
 import {
   drawFeatureMaps,
@@ -63,6 +64,7 @@ const playStats = new StatsTracker();
 
 // v2 pixel state.
 let pixelMeta = null;      // parsed pixel_agents block (null => v1-only manifest)
+let registryIndex = null;  // weights-free model registry (Model History panel)
 let FrameEnv = null;
 let renderEnv = null;
 let pixelScene = null;
@@ -84,6 +86,7 @@ function cacheEls() {
     "playKeypad",
     "pixelBoard", "pixelPreview", "pixelEye", "pixelAgent", "pixelEval",
     "pixelPause", "pixelRestart", "pixelSeed", "pixelActToggle", "pixelKeypad",
+    "pixelCalibrated", "pixelCalNote", "pxPresses", "pixelHistory",
     "pxLines", "pxPieces", "pxDecisions", "pxAction", "pxMs", "pxAux",
     "pixelActivations", "actConv1", "actConv2", "actConv3", "actFc", "actWire",
   ]) {
@@ -93,6 +96,7 @@ function cacheEls() {
   els.previewCtx = els.preview.getContext("2d");
   els.curveCtx = els.curve.getContext("2d");
   els.replayCtx = els.replayBoard.getContext("2d");
+  if (els.pixelHistory) els.pixelHistoryCtx = els.pixelHistory.getContext("2d");
   els.statEls = {
     lines: els.statLines, score: els.statScore, pieces: els.statPieces,
     pps: els.statPps, ms: els.statMs, params: els.statParams, size: els.statSize,
@@ -170,11 +174,17 @@ async function buildPixelScene() {
   const pa = await getPixelSession(agent);
   const env = new FrameEnv(seed);
   if (pixelKeypad) pixelKeypad.reset();
+  const stats = { presses: 0 };  // non-noop actions, for the live presses/piece stat
   const controller = new PixelController(env, renderEnv, pa, {
-    onPress: (action) => { if (pixelKeypad) pixelKeypad.press(ACTION_TO_KEY[action]); },
+    logitBias: agentLogitBias(agent),
+    calibrated: els.pixelCalibrated ? els.pixelCalibrated.checked : false,
+    onPress: (action) => {
+      if (action !== 0) stats.presses += 1;  // 0 == NOOP
+      if (pixelKeypad) pixelKeypad.press(ACTION_TO_KEY[action]);
+    },
   });
   await controller.begin();
-  pixelScene = { env, controller, kind: "pixel", agent };
+  pixelScene = { env, controller, kind: "pixel", agent, stats };
   lastDrawnDecision = -1;
   updatePixelEval(agent);
 }
@@ -184,11 +194,77 @@ function updatePixelEval(agent) {
   const bits = [];
   if (e.median_lines !== undefined && e.median_lines !== null)
     bits.push(`median ${Math.round(e.median_lines)} lines`);
-  if (e.mean_lines !== undefined && e.mean_lines !== null)
-    bits.push(`mean ${Number(e.mean_lines).toFixed(2)}`);
   if (e.pieces_per_game !== undefined && e.pieces_per_game !== null)
     bits.push(`${Math.round(e.pieces_per_game)} pc/game`);
+  if (e.presses_per_piece !== undefined && e.presses_per_piece !== null)
+    bits.push(`${Number(e.presses_per_piece).toFixed(1)} presses/piece raw`);
+  if (e.thrash !== undefined && e.thrash !== null)
+    bits.push(`thrash ${Number(e.thrash).toFixed(2)}`);
   els.pixelEval.textContent = bits.join(" · ") || "no eval stats";
+}
+
+// Model History panel: pieces/game (cyan, survival) and presses/piece (violet,
+// spam level, capped) across the registry's pixel iterations, ordered by created
+// date. Domain-mismatch is honest: gray-128 entries draw filled diamonds, the
+// older camouflage-255 entries draw hollow circles. Reuses drawCurve's dark
+// style. Median lines are ~0 everywhere so pieces/game is the informative axis.
+const PRESS_CAP = 40;  // presses/piece axis cap (untrained ~97 is off-scale spam)
+function drawPixelHistory(ctx, registry) {
+  const w = ctx.canvas.width, h = ctx.canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#0d1017";
+  ctx.fillRect(0, 0, w, h);
+  const entries = (registry && registry.entries || [])
+    .filter((e) => e.family !== "v1-valuenet");
+  if (entries.length < 1) {
+    ctx.fillStyle = "#5a6478";
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.fillText("no history", 8, h / 2);
+    return;
+  }
+  const pad = { l: 30, r: 30, t: 10, b: 16 };
+  const n = entries.length;
+  const px = (i) => pad.l + (n === 1 ? 0.5 : i / (n - 1)) * (w - pad.l - pad.r);
+  const pcs = entries.map((e) => e.eval && e.eval.pieces_per_game);
+  const pmax = Math.max(30, ...pcs.filter((v) => v != null));
+  const pyPcs = (v) => h - pad.b - (v / pmax) * (h - pad.t - pad.b);
+  const pyPress = (v) => h - pad.b - (Math.min(v, PRESS_CAP) / PRESS_CAP) * (h - pad.t - pad.b);
+
+  // Axes.
+  ctx.strokeStyle = "#2a3242"; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, h - pad.b);
+  ctx.lineTo(w - pad.r, h - pad.b); ctx.stroke();
+  ctx.font = "9px ui-monospace, monospace";
+  ctx.fillStyle = "#3fd0e0"; ctx.fillText(String(Math.round(pmax)), 2, pad.t + 7);
+  ctx.fillStyle = "#b46cf0"; ctx.fillText(String(PRESS_CAP), w - pad.r + 3, pad.t + 7);
+
+  const line = (accessor, py, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    let started = false;
+    entries.forEach((e, i) => {
+      const v = accessor(e);
+      if (v == null) return;
+      const X = px(i), Y = py(v);
+      if (!started) { ctx.moveTo(X, Y); started = true; } else ctx.lineTo(X, Y);
+    });
+    ctx.stroke();
+    entries.forEach((e, i) => {
+      const v = accessor(e);
+      if (v == null) return;
+      const X = px(i), Y = py(v);
+      ctx.fillStyle = color; ctx.strokeStyle = color; ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      if (e.domain === "gray-128") {           // filled diamond
+        ctx.moveTo(X, Y - 3); ctx.lineTo(X + 3, Y); ctx.lineTo(X, Y + 3);
+        ctx.lineTo(X - 3, Y); ctx.closePath(); ctx.fill();
+      } else {                                   // hollow circle (camouflage-255)
+        ctx.arc(X, Y, 2.6, 0, Math.PI * 2); ctx.stroke();
+      }
+    });
+  };
+  line((e) => e.eval && e.eval.pieces_per_game, pyPcs, "#3fd0e0");
+  line((e) => e.eval && e.eval.presses_per_piece, pyPress, "#b46cf0");
 }
 
 // ---- Game loop -------------------------------------------------------------
@@ -258,6 +334,11 @@ function renderPixel() {
   els.pxPieces.textContent = pixelScene.env.pieces;
   els.pxDecisions.textContent = c.decisions;
   els.pxMs.textContent = c.lastDecisionMs.toFixed(2);
+  if (els.pxPresses) {
+    const pcs = pixelScene.env.pieces;
+    const pp = pcs > 0 ? pixelScene.stats.presses / pcs : 0;
+    els.pxPresses.textContent = pp.toFixed(2);
+  }
   if (c.lastResult) {
     els.pxAction.textContent = pixelMeta.legend[c.lastResult.action] ?? "—";
     const aux = c.lastResult.aux;
@@ -354,6 +435,18 @@ function wireControls() {
       state.showActivations = els.pixelActToggle.checked;
       els.pixelActivations.classList.toggle("hidden", !state.showActivations);
     });
+    if (els.pixelCalibrated) {
+      els.pixelCalibrated.addEventListener("change", () => {
+        // Applies live to the running controller (no rebuild needed).
+        if (pixelScene && pixelScene.controller) {
+          pixelScene.controller.calibrated = els.pixelCalibrated.checked;
+        }
+        if (els.pixelCalNote) {
+          els.pixelCalNote.textContent = els.pixelCalibrated.checked
+            ? "reduces button-spam" : "raw net — watch the spam";
+        }
+      });
+    }
   }
 }
 
@@ -452,6 +545,8 @@ async function init() {
   manifest = await fetch("./models/manifest.json").then((r) => r.json());
   for (const a of manifest.agents) agentsById[a.id] = a;
   pixelMeta = parsePixelManifest(manifest);
+  registryIndex = await fetch("./models/registry.json")
+    .then((r) => r.json()).catch(() => null);  // optional; Model History panel
 
   els.selftest.textContent = "loading ONNX runtime…";
   try {
@@ -493,6 +588,9 @@ async function init() {
       els.pixelAgent.appendChild(opt);
     }
     els.pixelAgent.value = pixelMeta.final;
+    // Calibration ("calibrated presses") starts ON for the chosen default.
+    if (els.pixelCalibrated) els.pixelCalibrated.checked = !!pixelMeta.calibratedDefault;
+    if (els.pixelHistoryCtx) drawPixelHistory(els.pixelHistoryCtx, registryIndex);
   }
 
   wireControls();

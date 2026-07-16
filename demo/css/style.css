@@ -117,7 +117,7 @@ input[type="number"] { width: 90px; }
 .stats dt { color: var(--muted); font-size: 12px; margin: 0; }
 .stats dd { margin: 0; font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; font-size: 13px; }
 
-canvas#curve { width: 100%; height: auto; background: #0d1017; border-radius: 6px; }
+canvas#curve, canvas#pixelHistory { width: 100%; height: auto; background: #0d1017; border-radius: 6px; }
 
 .statusbar { border-top: 1px solid var(--line); padding: 10px 22px; font-size: 12px; }
 .selftest { font-family: ui-monospace, monospace; color: var(--muted); }

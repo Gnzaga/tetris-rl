@@ -313,7 +313,23 @@ def main(argv=None) -> int:
     t0 = time.perf_counter()
     with RunWriter(args.run_name, cfg, phase="bc") as run:
         results = train(run, cfg, args, console)
+        run_dir = run.run_dir
     elapsed = time.perf_counter() - t0
+
+    # Post-run hook: bookmark the final checkpoint in the durable model registry
+    # (skipped for smoke runs so tests never dirty the committed index).
+    if not args.smoke:
+        from tetris import registry
+        ms = results.get("milestones") or {}
+        final_ckpt = "nn_dagger_1" if (run_dir / "checkpoints" / "nn_dagger_1.pt").exists() \
+            else (ms.get("100", {}) or {}).get("checkpoint", "nn_step_0")
+        registry.register_from_run(
+            run_dir, family="pixel-bc", domain="gray-128", ckpt_name=final_ckpt,
+            summary=f"{args.run_name} — BC+DAgger final (auto-registered)",
+            entry_id=f"{args.run_name}_final",
+            notes="Auto-registered post-run; gray-128 render + aux(0.1). "
+                  "Re-run scripts/registry.py eval for presses/thrash diagnostics.",
+        )
 
     console.print(
         f"[green]run complete[/green] -> {run.run_dir}  ({elapsed:.1f}s)\n"

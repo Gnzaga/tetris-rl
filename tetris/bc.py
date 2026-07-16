@@ -765,6 +765,122 @@ def _greedy_actions(model, batch: np.ndarray, device: str) -> np.ndarray:
         return logits.argmax(dim=1).cpu().numpy()
 
 
+# Opposing-action pairs for the thrash metric (a press "reversed" by its opposite
+# within the next 2 decisions): LEFT<->RIGHT, ROT_CW<->ROT_CCW.
+from tetris.frame_env import LEFT, NOOP, RIGHT, ROT_CCW, ROT_CW  # noqa: E402
+
+_REVERSAL = {LEFT: RIGHT, RIGHT: LEFT, ROT_CW: ROT_CCW, ROT_CCW: ROT_CW}
+
+
+def _biased_actions(model, batch: np.ndarray, device: str,
+                    logit_bias: np.ndarray | None) -> np.ndarray:
+    """Greedy argmax over logits, optionally adding a per-class ``logit_bias``
+    (shape ``(5,)``) BEFORE the argmax — the inference-time log-prior calibration
+    (balanced-sampler training learns p_bal(a|s); adding scale*log(natural prior)
+    recovers a natural-posterior-like decision boundary and cuts false presses)."""
+    import torch
+
+    with torch.no_grad():
+        logits, _ = model(torch.from_numpy(batch).to(device))
+        logits = logits.detach().cpu().numpy()
+    if logit_bias is not None:
+        logits = logits + np.asarray(logit_bias, dtype=np.float64).reshape(1, -1)
+    return logits.argmax(axis=1)
+
+
+def thrash_score(actions: list[int]) -> tuple[int, int]:
+    """(reversed_presses, total_presses) for one game's decision sequence.
+
+    A decision is a PRESS if it is not ``noop``. A press at decision ``i`` is
+    *reversed* if either of decisions ``i+1`` or ``i+2`` is its opposing action
+    (LEFT<->RIGHT, ROT_CW<->ROT_CCW) — an immediate oscillation the expert never
+    makes. The thrash score is ``reversed_presses / total_presses`` (0 if no
+    presses). Documented precisely so the demo/report number is reproducible."""
+    presses = reversed_ = 0
+    n = len(actions)
+    for i, a in enumerate(actions):
+        if a == NOOP:
+            continue
+        presses += 1
+        opp = _REVERSAL[a]
+        if (i + 1 < n and actions[i + 1] == opp) or (i + 2 < n and actions[i + 2] == opp):
+            reversed_ += 1
+    return reversed_, presses
+
+
+def evaluate_policy_rich(model, seeds, max_pieces: int, device: str = "cpu",
+                         logit_bias: np.ndarray | None = None) -> dict:
+    """Closed-loop greedy eval (same lockstep machinery as :func:`evaluate_policy`)
+    with the toddler-spam diagnostics: per-action histogram, presses-per-piece,
+    press fraction, and the :func:`thrash_score`. ``logit_bias`` (optional ``(5,)``)
+    is added to the logits before argmax (inference-time log-prior calibration).
+
+    Returns a dict of aggregate stats over the games plus raw per-game lines/pieces.
+    """
+    seeds = [int(s) for s in seeds]
+    n = len(seeds)
+    envs = [FrameEnv(seed=s) for s in seeds]
+    hist = [deque(maxlen=4) for _ in range(n)]
+    act_seq: list[list[int]] = [[] for _ in range(n)]
+    done = [e.game_over or e.pieces >= max_pieces for e in envs]
+    model.eval()
+
+    while not all(done):
+        active = [i for i in range(n) if not done[i]]
+        if envs[active[0]].is_decision_tick:
+            batch = np.empty((len(active), 4, OBS_SIZE, OBS_SIZE), dtype=np.float32)
+            for bi, i in enumerate(active):
+                obs = render_env(envs[i])
+                h = hist[i]
+                if not h:
+                    for _ in range(4):
+                        h.append(obs)
+                else:
+                    h.append(obs)
+                batch[bi] = np.stack(h).astype(np.float32) / 255.0
+            acts = _biased_actions(model, batch, device, logit_bias)
+            for bi, i in enumerate(active):
+                a = int(acts[bi])
+                envs[i].apply_action(a)
+                act_seq[i].append(a)
+        for i in active:
+            envs[i].tick()
+            if envs[i].game_over or envs[i].pieces >= max_pieces:
+                done[i] = True
+
+    lines = [e.lines for e in envs]
+    pieces = [e.pieces for e in envs]
+    class_counts = np.zeros(NUM_ACTIONS, dtype=np.int64)
+    total_decisions = 0
+    rev_total = press_total = 0
+    for seq in act_seq:
+        for a in seq:
+            class_counts[a] += 1
+        total_decisions += len(seq)
+        r, p = thrash_score(seq)
+        rev_total += r
+        press_total += p
+    total_pieces = int(sum(pieces))
+    return {
+        "median_lines": float(statistics.median(lines)) if lines else 0.0,
+        "mean_lines": float(statistics.mean(lines)) if lines else 0.0,
+        "p10_lines": float(p10(lines)) if lines else 0.0,
+        "pieces_per_game": float(statistics.mean(pieces)) if pieces else 0.0,
+        "presses_per_piece": (press_total / total_pieces) if total_pieces else 0.0,
+        "press_frac": (press_total / total_decisions) if total_decisions else 0.0,
+        "thrash": (rev_total / press_total) if press_total else 0.0,
+        "action_hist": {ACTIONS[a]: (int(class_counts[a]),
+                                     float(class_counts[a] / total_decisions)
+                                     if total_decisions else 0.0)
+                        for a in range(NUM_ACTIONS)},
+        "n_games": n,
+        "total_pieces": total_pieces,
+        "total_presses": int(press_total),
+        "lines": [int(x) for x in lines],
+        "pieces": [int(x) for x in pieces],
+    }
+
+
 def evaluate_policy(model, seeds, max_pieces: int, device: str = "cpu") -> PolicyEval:
     """Closed-loop greedy real-time eval over ``seeds`` (headless ticks, argmax
     over logits at decision ticks). Games run in lockstep so their decision-tick

@@ -287,7 +287,19 @@ def main(argv=None) -> int:
     with RunWriter(args.run_name, cfg, phase="ppo") as run:
         results = run_training(run, cfg, model, optimizer, device, console,
                                stop_check=lambda: box["stop"])
+        run_dir = run.run_dir
     elapsed = time.perf_counter() - t0
+
+    # Post-run hook: bookmark the final checkpoint in the durable model registry
+    # (skipped for smoke runs so tests never dirty the committed index).
+    if not args.smoke:
+        from tetris import registry
+        registry.register_from_run(
+            run_dir, family="pixel-ppo", domain="gray-128", ckpt_name="nn_final",
+            summary=f"{args.run_name} — pure PPO final (auto-registered)",
+            entry_id=f"{args.run_name}_final",
+            notes="Auto-registered post-run; pure-RL contrast arm (time-boxed).",
+        )
 
     console.print(
         f"[green]run complete[/green] -> {run.run_dir}  ({elapsed:.1f}s)\n"

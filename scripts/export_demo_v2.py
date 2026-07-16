@@ -71,8 +71,57 @@ _BC_LABELS = {
     0: "PixelNet — untrained (0%)",
     25: "PixelNet — behavior-cloned 25%",
     50: "PixelNet — behavior-cloned 50%",
-    100: "PixelNet — behavior-cloned (BC final; best-effort, ~25 pieces)",
+    100: "PixelNet — BC final (DEFAULT; calibrated ≈3 presses/piece)",
 }
+
+# The demo-facing default, chosen by scripts/diagnose_spam.py: the BC-100
+# milestone with scale-1.0 log-prior calibration gives presses/piece 3.11
+# (dead-on the expert's 3.22), thrash 0.001 (vs the DAgger-final default's 30.5
+# presses/piece and 0.505 thrash — the "toddler spamming buttons"), longest
+# survival AND the highest mean lines. Calibration ON by default; the demo's
+# "calibrated presses" toggle turns it off to reveal the raw spam.
+CALIBRATED_DEFAULT_PID = "pixel_nn_100"
+CALIBRATION_SCALE = 1.0
+
+# pixel-agent manifest id -> registry entry id (for eval enrichment).
+_PID_TO_REGISTRY = {
+    "pixel_nn_000": "pixel_bc_v2_000",
+    "pixel_nn_025": "pixel_bc_v2_025",
+    "pixel_nn_050": "pixel_bc_v2_050",
+    "pixel_nn_100": "pixel_bc_v2_100",
+    "pixel_dagger_0": "pixel_bc_v2_dagger0",
+    "pixel_dagger_1": "pixel_bc_v2_dagger1",
+    "pixel_ppo_final": "pixel_ppo_v2_final",
+}
+
+
+def _natural_log_prior(data_dir: Path) -> list[float]:
+    """scale * log(natural class prior) from the training corpus meta, in action
+    order [noop, left, right, rot_cw, rot_ccw]. Added to logits at inference to
+    recover a natural-posterior decision boundary from the balanced-sampler net."""
+    meta = json.loads((data_dir / "meta.json").read_text())
+    cf = meta["class_fractions"]
+    order = ["noop", "left", "right", "rot_cw", "rot_ccw"]
+    return [float(CALIBRATION_SCALE * np.log(cf[a])) for a in order]
+
+
+def _enrich_evals(agents: list[dict[str, Any]]) -> None:
+    """Fold presses_per_piece / press_frac / thrash from the registry into each
+    pixel agent's eval block so the demo can show honest spam stats."""
+    try:
+        from tetris import registry
+        by_id = {e["id"]: e for e in registry.load()}
+    except Exception:
+        by_id = {}
+    for a in agents:
+        rid = _PID_TO_REGISTRY.get(a["id"])
+        rentry = by_id.get(rid) if rid else None
+        if not rentry:
+            continue
+        rev = rentry.get("eval", {})
+        for k in ("presses_per_piece", "press_frac", "thrash"):
+            if rev.get(k) is not None:
+                a["eval"][k] = rev[k]
 
 
 def _read_json(path: Path) -> Any:
@@ -260,6 +309,23 @@ def add_pixel_agents(
         final_onnx = out_dir / "pixel_nn_100.onnx"
         final_ckpt = bc_dir / "checkpoints" / f"{milestones['100']['checkpoint']}.pt"
 
+    # -- Toddler-spam fix: default to the calibrated BC-100 agent --------------
+    # (diagnosis: DAgger-final spams 30.5 presses/piece @ thrash 0.505; BC-100 +
+    # scale-1.0 log-prior calibration presses 3.11 @ thrash 0.001 — expert-like.)
+    logit_bias = _natural_log_prior(runs_dir / "bc_data_v2")
+    _enrich_evals(agents)
+    have = {a["id"] for a in agents}
+    if CALIBRATED_DEFAULT_PID in have:
+        final_pixel_id = CALIBRATED_DEFAULT_PID
+        final_onnx = out_dir / f"{CALIBRATED_DEFAULT_PID}.onnx"
+        final_ckpt = bc_dir / "checkpoints" / f"{milestones['100']['checkpoint']}.pt"
+    # Attach the same log-prior bias to every pixel agent so the demo toggle
+    # works on any selection; calibration starts ON (calibrated_default).
+    for a in agents:
+        a["logit_bias"] = logit_bias
+    _log(f"  calibrated default = {final_pixel_id} (scale {CALIBRATION_SCALE}, "
+         f"logit_bias={[round(x, 2) for x in logit_bias]})")
+
     # Optional PPO arm — only if its final checkpoint already exists.
     ppo_included = False
     ppo_final = runs_dir / ppo_run / "checkpoints" / "nn_final.pt"
@@ -294,6 +360,14 @@ def add_pixel_agents(
         "bc_run": bc_run,
         "ppo_run": ppo_run if ppo_included else None,
         "final": final_pixel_id,
+        "calibrated_default": True,
+        "calibration": {
+            "scale": CALIBRATION_SCALE,
+            "source": "scale * log(natural class prior) from bc_data_v2 meta",
+            "logit_bias": logit_bias,
+            "note": "log-prior calibration; cuts the raw net's false-press spam "
+                    "(diagnosis: presses/piece 30.5->3.1, thrash 0.51->0.001).",
+        },
         "input_name": POLICY_INPUT_NAME,
         "output_names": list(POLICY_OUTPUT_NAMES),
         "output_shapes": POLICY_OUTPUT_SHAPES,
@@ -310,6 +384,17 @@ def add_pixel_agents(
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
         f.write("\n")
+
+    # Export the weights-free registry index into the demo (Model History panel).
+    try:
+        from tetris import registry
+        entries = registry.load()
+        if entries:
+            registry.write_demo_index(entries, out_dir / "registry.json")
+            _log(f"  wrote {out_dir / 'registry.json'} ({len(entries)} registry entries)")
+    except Exception as ex:
+        _log(f"  (registry index not exported: {ex})")
+
     _log(f"wrote {manifest_path} (+pixel_agents: {len(agents)} agents, "
          f"final={final_pixel_id}, ppo={'yes' if ppo_included else 'no'})")
     return manifest

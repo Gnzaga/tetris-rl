@@ -138,6 +138,13 @@
               <span>Activations</span>
             </label>
           </div>
+          <div class="control-row">
+            <label class="toggle">
+              <input id="pixelCalibrated" type="checkbox" />
+              <span>Calibrated presses</span>
+            </label>
+            <span id="pixelCalNote" class="note inline">reduces button-spam</span>
+          </div>
         </div>
 
         <div class="card">
@@ -146,10 +153,17 @@
             <div><dt>Lines</dt><dd id="pxLines">0</dd></div>
             <div><dt>Pieces</dt><dd id="pxPieces">0</dd></div>
             <div><dt>Decisions</dt><dd id="pxDecisions">0</dd></div>
+            <div><dt>Presses/piece</dt><dd id="pxPresses">0.00</dd></div>
             <div><dt>Action</dt><dd id="pxAction">—</dd></div>
             <div><dt>Decision ms</dt><dd id="pxMs">0.00</dd></div>
             <div><dt>Predicted</dt><dd id="pxAux">—</dd></div>
           </dl>
+        </div>
+
+        <div class="card">
+          <div class="row-label">Model history · pieces/game (◆ gray render, ○ camouflage)</div>
+          <canvas id="pixelHistory" width="300" height="140"></canvas>
+          <div id="pixelHistoryNote" class="note">Iterations over time; presses/piece as a second series.</div>
         </div>
 
         <div class="card">

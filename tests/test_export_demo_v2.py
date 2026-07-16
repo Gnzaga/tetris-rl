@@ -138,10 +138,20 @@ def test_strict_parity_on_real_obs_domain(built):
     from tetris.render_obs import render_env
     import torch
 
+    import json as _json
+
     m, out_dir = built
     pa = m["pixel_agents"]
     final_path = next(a["path"] for a in pa["agents"] if a["id"] == pa["final"])
-    ckpt = _ROOT / "runs" / BC_RUN / "checkpoints" / "nn_dagger_1.pt"
+    # Resolve the checkpoint backing the FINAL agent (the demo default may be a
+    # BC milestone or a DAgger iter — it is the calibrated BC-100 milestone since
+    # the toddler-spam fix, not necessarily nn_dagger_1).
+    bc_cfg = _json.loads((_ROOT / "runs" / BC_RUN / "config.json").read_text())
+    ckpt_map = {f"pixel_nn_{int(p):03d}": info["checkpoint"]
+                for p, info in bc_cfg["milestones"].items()}
+    ckpt_map["pixel_dagger_0"] = "nn_dagger_0"
+    ckpt_map["pixel_dagger_1"] = "nn_dagger_1"
+    ckpt = _ROOT / "runs" / BC_RUN / "checkpoints" / f"{ckpt_map[pa['final']]}.pt"
     model = load_policynet(ckpt)
 
     stacks = []
