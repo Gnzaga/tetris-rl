@@ -7,7 +7,6 @@ import {
   createRunner,
   loadOrt,
   runSelfTest,
-  RandomRunner,
 } from "./runner.js";
 import {
   renderBoard,
