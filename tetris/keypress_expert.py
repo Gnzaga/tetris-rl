@@ -6,8 +6,11 @@ Given a :class:`~tetris.frame_env.FrameEnv` at a piece's spawn, the expert:
    layer's board (reusing the frozen v1 engine's ``candidate_features`` — the
    frame board is a plain 20-row bitboard, identical representation).
 2. Filters to REACHABLE placements. For each candidate ``(rot, col)`` it builds
-   the *naive* keypress script — all rotations first, then all slides, then
-   noops until lock — and forward-simulates it on a CLONE of the frame env
+   the *naive* keypress script — noops until the piece is FULLY VISIBLE (every
+   cell at row >= 0; camera-faithfulness, §4 amendment — the wait lives in the
+   script driver, see :func:`simulate_script` / :class:`ExpertPlayer`), then all
+   rotations, then all slides, then noops until lock — and forward-simulates it
+   on a CLONE of the frame env
    (exact frame-layer physics: 3 ticks per decision, 1 gravity row per 24
    ticks). A placement is reachable iff the sim locks at exactly ``(rot, col)``
    with ``tuck=False`` (i.e. the piece comes to rest at its v1 straight-drop
@@ -98,6 +101,19 @@ def clone_env(env: FrameEnv) -> FrameEnv:
 # --------------------------------------------------------------------------
 
 
+def fully_visible(env: FrameEnv) -> bool:
+    """True iff every active-piece cell is on the visible board (row >= 0).
+
+    Camera-faithfulness (PLAN2.md §4 amendment): the expert may not act until
+    this holds — before that the camera has not rendered the piece at all (§1:
+    cells above the board are not drawn) and the preview already shows the NEXT
+    piece, so any earlier action would be conditioned on invisible state.
+    Bounding boxes are tight (the top bbox row always contains a cell), so the
+    exact per-cell test reduces to ``env.row >= 0``; we keep the honest form.
+    """
+    return all(env.row + ro >= 0 for ro, _ in PIECES[env.piece][env.rot].cells)
+
+
 def naive_script(piece: int, target_rot: int, target_col: int) -> list[int]:
     """The naive per-decision-tick action list for ``(target_rot, target_col)``:
     all rotations first, then all slides. Noops-until-lock are implicit (the
@@ -182,6 +198,10 @@ def relabel_action(env: FrameEnv, teacher) -> int:
     wins, and its script's FIRST action is returned as the label (``NOOP`` when
     the script is empty — already positioned — or nothing is reachable).
 
+    Camera-faithfulness (§4 amendment): while the piece is NOT fully visible the
+    label is ``NOOP`` unconditionally — the expert never acts on state the
+    camera cannot see, and neither may the labels the student imitates.
+
     ``env`` is never mutated. This is the correct DAgger relabel: it reflects
     what the expert would press RIGHT NOW given where the student left the piece,
     which a spawn-time script cannot express once the piece has moved.
@@ -209,6 +229,8 @@ class _DaggerRelabelCore:
         self._order = None
 
     def relabel(self, env: FrameEnv) -> int:
+        if not fully_visible(env):  # §4 amendment: no label before the camera sees it
+            return NOOP
         if self._placements is None or env.pieces != self._pieces:
             scored = self.teacher.scores(_placement_engine(env))
             self._pieces = env.pieces
@@ -231,10 +253,14 @@ class DaggerRelabeler(_DaggerRelabelCore):
     """Public per-game relabeler (see :class:`_DaggerRelabelCore`)."""
 
 
-def simulate_script(env: FrameEnv, script: list[int]) -> dict | None:
+def simulate_script(env: FrameEnv, script: list[int],
+                    wait_visible: bool = True) -> dict | None:
     """Forward-simulate ``script`` on ``env`` (mutated; pass a clone) exactly as
-    the real driver would: one action per decision tick starting at the current
-    decision tick, ``NOOP`` once the script is exhausted, ticking to the lock.
+    the real driver would: ``NOOP`` at every decision tick until the piece is
+    fully visible (camera-faithfulness, §4 amendment — the spec default), then
+    one script action per decision tick, ``NOOP`` once the script is exhausted,
+    ticking to the lock. ``wait_visible=False`` gives the raw pre-amendment
+    driver (kept for pose-relative sims that start from a visible pose).
 
     Returns the frame layer's lock-event dict (``r`` = rotation, ``c`` = column,
     ``tuck`` flag) for the piece active at call time, or ``None`` if the game
@@ -243,8 +269,11 @@ def simulate_script(env: FrameEnv, script: list[int]) -> dict | None:
     i = 0
     while not env.game_over:
         if env.is_decision_tick:
-            env.apply_action(script[i] if i < len(script) else NOOP)
-            i += 1
+            if wait_visible and not fully_visible(env):
+                env.apply_action(NOOP)
+            else:
+                env.apply_action(script[i] if i < len(script) else NOOP)
+                i += 1
         lock = env.tick()
         if lock is not None:
             return lock
@@ -446,6 +475,12 @@ class ExpertPlayer:
             self._script = self.last_plan.script
             self._i = 0
             self._plan_pieces = env.pieces
+        # Camera-faithfulness (§4 amendment): emit NOOP — without consuming the
+        # script — until the piece is fully visible. Planning above happens at
+        # spawn (the board/next-preview it reads are unchanged by the fall), but
+        # no rotation/slide is pressed before the camera has seen the piece.
+        if not fully_visible(env):
+            return NOOP
         a = self._script[self._i] if self._i < len(self._script) else NOOP
         self._i += 1
         return a

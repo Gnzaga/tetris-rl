@@ -1,7 +1,9 @@
 """BC + DAgger driver for the pixel-input keypress policy (PLAN2.md §6, Phase D).
 
-Trains :class:`tetris.policy_model.PolicyNet` by class-weighted behavioral
-cloning on the keypress-expert corpus (``runs/bc_data_v1``), then optionally runs
+Trains :class:`tetris.policy_model.PolicyNet` by behavioral cloning on the
+keypress-expert corpus (``runs/bc_data_v1``) with CLASS-BALANCED batch sampling
+and unweighted cross-entropy (§6 amendment; the step budget is "epochs' worth"
+— ``epochs * ceil(n/batch)`` — see ``tetris.bc.balanced_batches``), then runs
 DAgger: roll out the student, relabel every visited decision frame with the
 expert's CURRENT-POSE action, aggregate, and continue training. Closed-loop
 greedy eval (20 real-time games, seeds 950000+, 10k-piece cap) runs every
@@ -56,9 +58,12 @@ def _build_config(args, device, total_steps, n_frames) -> dict:
         "total_optimizer_steps": total_steps,
         "dagger_iters": args.dagger_iters,
         "dagger_frames": args.dagger_frames,
+        "sampler": "class-balanced batches (~uniform over present classes, "
+                   "per-class draw with replacement), UNWEIGHTED cross-entropy "
+                   "(PLAN2.md §6 amendment); steps = epochs * ceil(n/batch)",
         "dagger_retrain_epochs": 1,
-        "dagger_aggregation": "base + all dagger shards, reshuffled 1 epoch, "
-                              "continues optimizer state",
+        "dagger_aggregation": "base + all dagger shards, balanced-sampled for 1 "
+                              "epoch's worth of steps, continues optimizer state",
         "teacher": args.teacher,
         "eval_games": args.eval_games,
         "eval_max_pieces": args.eval_max_pieces,
@@ -109,14 +114,13 @@ def train(run, cfg, args, console) -> dict:
     console.print(f"[cyan]PolicyNet[/cyan]: {count_parameters(model):,} params, device={device}")
 
     dataset = bc.BCDataset(args.data_dir)
-    weights = bc.inverse_freq_weights(bc.class_histogram(np.asarray(dataset.actions)))
-    wt = bc.weight_tensor(weights, device)
     total = bc.num_optimizer_steps(len(dataset), cfg["batch_size"], cfg["epochs"])
     steps_per_epoch = bc.num_optimizer_steps(len(dataset), cfg["batch_size"], 1)
     eval_every = max(1, steps_per_epoch // 4)
     milestone_steps = {p: (round(p / 100 * total)) for p in MILESTONE_PCTS}
-    console.print(f"[cyan]BC[/cyan]: {len(dataset):,} frames, {cfg['epochs']} epochs, "
-                  f"{total:,} steps, eval every {eval_every}, milestones {milestone_steps}")
+    console.print(f"[cyan]BC[/cyan]: {len(dataset):,} frames, balanced sampler, "
+                  f"{cfg['epochs']} epochs' worth = {total:,} steps, "
+                  f"eval every {eval_every}, milestones {milestone_steps}")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
     eval_medians = {}      # optimizer_step -> median (for milestone lookup)
@@ -132,9 +136,8 @@ def train(run, cfg, args, console) -> dict:
     loss_sum = loss_cnt = 0
     t_last = time.perf_counter()
     seen_last = 0
-    for _ep, stacks, labels in bc.iter_minibatches(dataset, cfg["batch_size"],
-                                                   cfg["epochs"], rng):
-        loss = bc.train_step(model, optimizer, stacks, labels, wt, device)
+    for stacks, labels in bc.balanced_batches(dataset, cfg["batch_size"], total, rng):
+        loss = bc.train_step(model, optimizer, stacks, labels, device)
         step += 1
         loss_sum += loss
         loss_cnt += 1
@@ -176,12 +179,13 @@ def train(run, cfg, args, console) -> dict:
         bc.write_dagger_dataset(shard_dir, roll)
         shards.append(bc.BCDataset(shard_dir))
         combined = bc.MultiBCDataset(shards)
-        weights = bc.combined_class_weights(combined)
-        wt = bc.weight_tensor(weights, device)
+        retrain_steps = bc.num_optimizer_steps(len(combined), cfg["batch_size"], 1)
         console.print(f"  relabeled {roll['n_frames']:,} frames in {roll['elapsed_s']}s; "
-                      f"combined = {len(combined):,} frames; retrain 1 epoch")
-        for _ep, stacks, labels in bc.iter_minibatches(combined, cfg["batch_size"], 1, rng):
-            loss = bc.train_step(model, optimizer, stacks, labels, wt, device)
+                      f"combined = {len(combined):,} frames; retrain 1 epoch's worth "
+                      f"= {retrain_steps:,} balanced steps")
+        for stacks, labels in bc.balanced_batches(combined, cfg["batch_size"],
+                                                  retrain_steps, rng):
+            loss = bc.train_step(model, optimizer, stacks, labels, device)
             step += 1
         ev, pc = _do_eval(run, model, cfg, step, "dagger", loss, 0.0, combined, rng, console)
         _save_ckpt(run, f"nn_dagger_{it}", model, step, "dagger", pc, ev.median_lines)

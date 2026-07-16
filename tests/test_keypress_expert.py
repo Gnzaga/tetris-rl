@@ -16,6 +16,7 @@ from tetris.keypress_expert import (
     ExpertPlayer,
     _placement_engine,
     clone_env,
+    fully_visible,
     is_reachable,
     make_teacher,
     naive_script,
@@ -74,6 +75,35 @@ def test_naive_script_shapes():
     from tetris.keypress_expert import ROT_CW, ROT_CCW
 
     assert all(a not in (ROT_CW, ROT_CCW) for a in naive_script(O, 0, 7))
+
+
+# -- camera-faithfulness (§4 amendment) --------------------------------------
+
+
+@pytest.mark.parametrize("seed", [0, 7, 42, 900000, 123456])
+def test_expert_never_acts_before_full_visibility(seed):
+    # Property: at every decision tick where any active-piece cell is above the
+    # visible board (not rendered), the expert emits NOOP. Non-noop presses only
+    # ever happen on fully visible pieces — the camera-faithfulness amendment.
+    from tetris.frame_env import NOOP as _NOOP
+
+    env = FrameEnv(seed=seed)
+    player = ExpertPlayer(_cem())
+    player.reset(env)
+    invisible_decisions = 0
+    nonnoop = 0
+    while not env.game_over and env.pieces < 80:
+        if env.is_decision_tick:
+            a = player.act(env)
+            if not fully_visible(env):
+                invisible_decisions += 1
+                assert a == _NOOP
+            elif a != _NOOP:
+                nonnoop += 1
+            env.apply_action(a)
+        env.tick()
+    assert invisible_decisions > 50  # every spawn starts above the board
+    assert nonnoop > 50              # and the expert still steers plenty
 
 
 # -- determinism ------------------------------------------------------------

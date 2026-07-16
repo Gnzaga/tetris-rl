@@ -28,9 +28,9 @@ from tetris.keypress_expert import (
     ExpertPlayer,
     clone_env,
     current_pose_script,
+    fully_visible,
     make_teacher,
     naive_script,
-    plan,
     relabel_action,
     simulate_script,
 )
@@ -107,6 +107,7 @@ def test_relabel_matches_forward_sim_and_diverges_from_naive():
     teacher = _cem()
     verified = 0
     diverged = 0
+    invisible = 0
     for seed in range(12):
         env = FrameEnv(seed=seed)
         player = ExpertPlayer(teacher)
@@ -114,39 +115,72 @@ def test_relabel_matches_forward_sim_and_diverges_from_naive():
         while not env.game_over and env.pieces < 60:
             if env.is_decision_tick:
                 a = relabel_action(env, teacher)
-                chosen = _chosen_placement(env, teacher)
-                if chosen is not None:
-                    rot, col, script = chosen
-                    # Label is the first action of the forward-sim-verified script.
-                    assert a == (script[0] if script else NOOP)
-                    lock = simulate_script(clone_env(env), script)
-                    assert (lock["r"], lock["c"], lock["tuck"]) == (rot, col, False)
-                    verified += 1
-                    # Divergence: naive spawn-script first action for the same
-                    # target vs the current-pose label.
-                    spawn_col = (WIDTH - PIECES[env.piece][0].width) // 2
-                    if env.rot != 0 or env.col != spawn_col:
-                        nav = naive_script(env.piece, rot, col)
-                        nav_first = nav[0] if nav else NOOP
-                        if nav_first != a:
-                            diverged += 1
+                if not fully_visible(env):
+                    # §4 amendment: no label before the camera sees the piece.
+                    assert a == NOOP
+                    invisible += 1
+                else:
+                    chosen = _chosen_placement(env, teacher)
+                    if chosen is not None:
+                        rot, col, script = chosen
+                        # Label = first action of the forward-sim-verified script.
+                        assert a == (script[0] if script else NOOP)
+                        lock = simulate_script(clone_env(env), script)
+                        assert (lock["r"], lock["c"], lock["tuck"]) == (rot, col, False)
+                        verified += 1
+                        # Divergence: naive spawn-script first action for the
+                        # same target vs the current-pose label.
+                        spawn_col = (WIDTH - PIECES[env.piece][0].width) // 2
+                        if env.rot != 0 or env.col != spawn_col:
+                            nav = naive_script(env.piece, rot, col)
+                            nav_first = nav[0] if nav else NOOP
+                            if nav_first != a:
+                                diverged += 1
                 env.apply_action(player.act(env))
             env.tick()
     assert verified > 500, f"too few relabels verified ({verified})"
     assert diverged > 0, "expected mid-flight relabel/naive divergences"
+    assert invisible > 100, "expected above-board decision ticks in real games"
 
 
-def test_relabel_matches_plan_at_spawn():
-    # On a fresh spawn (pose == spawn) the relabel label equals the expert plan's
-    # first scripted action when the plan found a reachable placement.
+def test_relabel_noop_while_not_fully_visible():
+    teacher = _cem()
+    # Fresh spawn: bounding-box bottom at board row -1 => not fully visible.
+    env = FrameEnv(seed=7)
+    assert env.is_decision_tick and not fully_visible(env)
+    assert relabel_action(env, teacher) == NOOP
+    assert DaggerRelabeler(teacher).relabel(env) == NOOP
+    # Hand-built PARTIALLY visible state: T (2 rows tall) straddling the top
+    # edge — bottom cells on row 0 are rendered, top cells at row -1 are not.
+    env2 = FrameEnv(seed=0)
+    env2.rows = [0] * 20
+    env2.piece, env2.rot, env2.col, env2.row = T, 0, 3, -1
+    env2.tick_count, env2.gravity_counter, env2.game_over = 0, 0, False
+    assert not fully_visible(env2)
+    assert relabel_action(env2, teacher) == NOOP
+    # One row lower it is fully visible and the relabel engages.
+    env2.row = 0
+    assert fully_visible(env2)
+
+
+def test_relabel_matches_player_at_first_visible_tick():
+    # Tick a fresh game to the FIRST fully-visible decision tick (piece still at
+    # rot 0 / spawn col — only descended). The relabel's current-pose replan and
+    # the player's spawn-time plan see the same board, pose, and reachability
+    # (spawn-time sims wait for visibility too), so their actions must agree.
     teacher = _cem()
     env = FrameEnv(seed=7)
-    # First decision tick is at spawn.
-    assert env.is_decision_tick
-    pr = plan(env, teacher)
-    a = relabel_action(env, teacher)
-    if pr.reachable:
-        assert a == (pr.script[0] if pr.script else NOOP)
+    player = ExpertPlayer(teacher)
+    player.reset(env)
+    while True:
+        if env.is_decision_tick and fully_visible(env):
+            a_relabel = relabel_action(env, teacher)
+            a_player = player.act(env)
+            assert a_relabel == a_player
+            break
+        if env.is_decision_tick:
+            env.apply_action(player.act(env))  # NOOPs while invisible
+        env.tick()
 
 
 def test_relabeler_cache_matches_uncached():
@@ -200,6 +234,48 @@ def test_multi_dataset_indexing(tiny_ds):
         local = gi if gi < len(a) else gi - len(a)
         src = a if gi < len(a) else b
         np.testing.assert_array_equal(batch[bi], src.stack(int(local)))
+
+
+# -- class-balanced batch sampler (§6 amendment) ----------------------------
+
+
+def test_balanced_batches_uniformish(tiny_ds):
+    from tetris.bc import BCDataset, balanced_batches
+
+    ds = BCDataset(tiny_ds)
+    rng = np.random.default_rng(0)
+    present = [a for a in range(5) if (ds.actions == a).any()]
+    k = len(present)
+    batches = list(balanced_batches(ds, 65, 4, rng))
+    assert len(batches) == 4  # yields exactly total_steps batches
+    for stacks, labels in batches:
+        assert stacks.shape == (65, 4, 96, 96)
+        assert labels.shape == (65,) and labels.dtype == np.int64
+        counts = np.bincount(labels, minlength=5)
+        for a in range(5):
+            if a in present:
+                # each present class gets its ~uniform share (base or base+1)
+                assert abs(counts[a] - 65 / k) <= 1
+            else:
+                assert counts[a] == 0
+
+
+def test_balanced_batches_labels_match_frames(tiny_ds):
+    # Every sampled (stack, label) pair must be a real dataset pair: the last
+    # slice of the stack equals the frame whose action is the label, for some
+    # dataset index with that exact frame+action. Verify via lookup by content.
+    from tetris.bc import BCDataset, balanced_batches, pack_obs
+
+    ds = BCDataset(tiny_ds)
+    key_to_actions = {}
+    for i in range(len(ds)):
+        key_to_actions.setdefault(ds.frames[i].tobytes(), set()).add(int(ds.actions[i]))
+    rng = np.random.default_rng(1)
+    stacks, labels = next(balanced_batches(ds, 32, 1, rng))
+    for j in range(32):
+        frame = (stacks[j, 3] * 255).astype(np.uint8)
+        key = pack_obs(frame).tobytes()
+        assert int(labels[j]) in key_to_actions[key]
 
 
 # -- closed-loop policy eval (shared with PPO) -----------------------------

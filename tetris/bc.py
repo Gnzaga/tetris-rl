@@ -396,23 +396,44 @@ class MultiBCDataset:
 
 
 def num_optimizer_steps(n: int, batch_size: int, epochs: int) -> int:
+    """"``epochs`` epochs' WORTH" of optimizer steps: the balanced sampler (below)
+    has no natural epoch boundary, so the step budget is defined as the count a
+    plain shuffled pass would have used — ``epochs * ceil(n / batch)`` — keeping
+    the budget comparable to the pre-amendment weighted-CE run."""
     return epochs * math.ceil(n / batch_size)
 
 
-def iter_minibatches(dataset, batch_size: int, epochs: int, rng: np.random.Generator):
-    """Yield ``(epoch, stacks[B,4,96,96] f32, labels[B] int64)`` for ``epochs``
-    reshuffled passes over ``dataset`` (drop no tail; last batch may be short)."""
-    n = len(dataset)
-    for ep in range(epochs):
-        perm = rng.permutation(n)
-        for start in range(0, n, batch_size):
-            idx = perm[start:start + batch_size]
-            yield ep, dataset.batch_stacks(idx), dataset.actions[idx].astype(np.int64)
+def balanced_batches(dataset, batch_size: int, total_steps: int,
+                     rng: np.random.Generator):
+    """Class-balanced batch stream (PLAN2.md §6 amendment). Yields exactly
+    ``total_steps`` ``(stacks[B,4,96,96] f32, labels[B] int64)`` batches, each
+    drawn ~uniformly over the action classes PRESENT in ``dataset``: every class
+    contributes ``batch // k`` samples (the remainder spread one-per-class), so
+    noop's natural ~98% share never dominates a batch. Indices are drawn per
+    class WITH replacement — minority classes are orders of magnitude smaller
+    than the balanced stream consumes (rot_ccw ~0.1% of frames), so each of
+    their frames recurs many times while the majority class is subsampled; this
+    is the intended trade. Loss is UNWEIGHTED cross-entropy — the balance lives
+    in the sampler, not the loss (no residual weights)."""
+    actions = np.asarray(dataset.actions)
+    pools = [np.flatnonzero(actions == a) for a in range(NUM_ACTIONS)]
+    present = [p for p in pools if len(p)]
+    k = len(present)
+    base, rem = divmod(batch_size, k)
+    for _ in range(total_steps):
+        parts = [
+            pool[rng.integers(0, len(pool), size=base + (1 if j < rem else 0))]
+            for j, pool in enumerate(present)
+        ]
+        idx = np.concatenate(parts)
+        rng.shuffle(idx)
+        yield dataset.batch_stacks(idx), actions[idx].astype(np.int64)
 
 
 def train_step(model, optimizer, stacks: np.ndarray, labels: np.ndarray,
-               weight, device: str) -> float:
-    """One class-weighted cross-entropy optimizer step; returns the scalar loss."""
+               device: str) -> float:
+    """One unweighted cross-entropy optimizer step; returns the scalar loss.
+    (Class balance is the sampler's job — see :func:`balanced_batches`.)"""
     import torch
     import torch.nn.functional as F
 
@@ -420,17 +441,11 @@ def train_step(model, optimizer, stacks: np.ndarray, labels: np.ndarray,
     x = torch.from_numpy(stacks).to(device)
     y = torch.from_numpy(labels).to(device)
     logits, _ = model(x)
-    loss = F.cross_entropy(logits, y, weight=weight)
+    loss = F.cross_entropy(logits, y)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
     return float(loss.item())
-
-
-def weight_tensor(weights: np.ndarray, device: str):
-    import torch
-
-    return torch.tensor(np.asarray(weights, dtype=np.float32), device=device)
 
 
 def per_class_accuracy(model, dataset, device: str, n_samples: int,
@@ -621,13 +636,6 @@ def write_dagger_dataset(out_dir: str | Path, roll: dict) -> Path:
     with open(out_dir / "meta.json", "w") as f:
         json.dump(meta, f, indent=2)
     return out_dir
-
-
-def combined_class_weights(dataset) -> np.ndarray:
-    """Capped inverse-frequency weights recomputed over a (possibly multi-shard)
-    dataset's label distribution — DAgger shifts the class mix, so weights are
-    refreshed each retrain rather than reused from the base meta."""
-    return inverse_freq_weights(class_histogram(np.asarray(dataset.actions)))
 
 
 # --------------------------------------------------------------------------
