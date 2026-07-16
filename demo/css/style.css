@@ -1,0 +1,126 @@
+:root {
+  --bg: #0a0c11;
+  --panel: #12161f;
+  --card: #161b26;
+  --line: #232a38;
+  --text: #dce3ee;
+  --muted: #7a8497;
+  --accent: #3fd0e0;
+  --accent2: #b46cf0;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(900px 500px at 15% -10%, rgba(63, 208, 224, 0.08), transparent),
+    radial-gradient(800px 500px at 100% 0%, rgba(180, 108, 240, 0.08), transparent),
+    var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: baseline; gap: 12px; }
+.brand h1 {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: 0.5px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.subtitle { color: var(--muted); font-size: 12px; }
+
+.tabs { display: flex; gap: 6px; }
+.tab {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  padding: 7px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.tab.active { color: var(--text); border-color: var(--accent); background: rgba(63, 208, 224, 0.08); }
+
+main { padding: 22px; }
+.panel { display: flex; gap: 22px; align-items: flex-start; flex-wrap: wrap; }
+.panel.hidden { display: none; }
+
+.stage { display: flex; gap: 14px; }
+canvas#board, canvas#replayBoard {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0d1017;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+}
+.preview-wrap { display: flex; flex-direction: column; gap: 6px; }
+.preview-label { color: var(--muted); font-size: 11px; letter-spacing: 1px; }
+canvas#preview { border: 1px solid var(--line); border-radius: 8px; }
+
+.sidebar { display: flex; flex-direction: column; gap: 14px; width: 320px; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+}
+.card.note { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+.row-label { color: var(--muted); font-size: 11px; letter-spacing: 1px; margin-bottom: 10px; text-transform: uppercase; }
+
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+.field.inline { flex-direction: row; align-items: center; gap: 8px; }
+.field + .field { margin-top: 12px; }
+select, input[type="number"] {
+  background: #0d1017;
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 7px 9px;
+  font-size: 13px;
+  width: 100%;
+}
+input[type="number"] { width: 90px; }
+.eval { color: var(--accent); font-size: 12px; margin-top: 8px; min-height: 14px; }
+
+.speeds { display: flex; gap: 6px; margin-bottom: 10px; }
+.speed-btn, .controls button {
+  flex: 1;
+  background: #0d1017;
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 8px 0;
+  cursor: pointer;
+  font-size: 13px;
+}
+.speed-btn.active { border-color: var(--accent); background: rgba(63, 208, 224, 0.12); color: var(--accent); }
+.controls { display: flex; gap: 6px; margin-bottom: 12px; }
+.controls button:hover, .speed-btn:hover, .tab:hover { border-color: var(--accent2); }
+
+.control-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.toggle { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; cursor: pointer; }
+
+.stats { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+.stats > div { display: flex; justify-content: space-between; border-bottom: 1px dotted var(--line); padding-bottom: 4px; }
+.stats dt { color: var(--muted); font-size: 12px; margin: 0; }
+.stats dd { margin: 0; font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; font-size: 13px; }
+
+canvas#curve { width: 100%; height: auto; background: #0d1017; border-radius: 6px; }
+
+.statusbar { border-top: 1px solid var(--line); padding: 10px 22px; font-size: 12px; }
+.selftest { font-family: ui-monospace, monospace; color: var(--muted); }
+.selftest.pass { color: #5fd35a; }
+.selftest.fail { color: #f0584a; }
+.selftest.warn { color: #f0a04a; }

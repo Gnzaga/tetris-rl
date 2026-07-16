@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tetris RL — Afterstate Value Agent Demo</title>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Tetris&nbsp;RL</h1>
+      <span class="subtitle">afterstate value agent · local browser demo</span>
+    </div>
+    <nav class="tabs">
+      <button id="tabPlay" class="tab active">Play</button>
+      <button id="tabReplay" class="tab">Replay</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ===================== PLAY ===================== -->
+    <section id="panelPlay" class="panel">
+      <div class="stage">
+        <canvas id="board" width="240" height="552"></canvas>
+        <div class="preview-wrap">
+          <div class="preview-label">NEXT</div>
+          <canvas id="preview" width="96" height="360"></canvas>
+        </div>
+      </div>
+
+      <div class="sidebar">
+        <div class="card">
+          <label class="field">
+            <span>Agent / checkpoint</span>
+            <select id="agent"></select>
+          </label>
+          <div id="agentEval" class="eval"></div>
+        </div>
+
+        <div class="card">
+          <div class="row-label">Speed</div>
+          <div class="speeds">
+            <button class="speed-btn" data-speed="1">1×</button>
+            <button class="speed-btn" data-speed="4">4×</button>
+            <button class="speed-btn" data-speed="20">20×</button>
+            <button class="speed-btn" data-speed="MAX">MAX</button>
+          </div>
+          <div class="controls">
+            <button id="pause">Pause</button>
+            <button id="step">Step</button>
+            <button id="restart">Restart</button>
+          </div>
+          <div class="control-row">
+            <label class="field inline">
+              <span>Seed</span>
+              <input id="seed" type="number" value="1" min="0" />
+            </label>
+            <label class="toggle">
+              <input id="heatmap" type="checkbox" />
+              <span>Heatmap</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="row-label">Stats</div>
+          <dl class="stats">
+            <div><dt>Lines</dt><dd id="statLines">0</dd></div>
+            <div><dt>Score</dt><dd id="statScore">0</dd></div>
+            <div><dt>Pieces</dt><dd id="statPieces">0</dd></div>
+            <div><dt>PPS</dt><dd id="statPps">0.0</dd></div>
+            <div><dt>Decision ms</dt><dd id="statMs">0.00</dd></div>
+            <div><dt>Params</dt><dd id="statParams">—</dd></div>
+            <div><dt>Model size</dt><dd id="statSize">—</dd></div>
+          </dl>
+        </div>
+
+        <div class="card">
+          <div class="row-label">Training curve · median lines</div>
+          <canvas id="curve" width="300" height="130"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== REPLAY ===================== -->
+    <section id="panelReplay" class="panel hidden">
+      <div class="stage">
+        <canvas id="replayBoard" width="240" height="552"></canvas>
+      </div>
+      <div class="sidebar">
+        <div class="card">
+          <label class="field">
+            <span>Training run</span>
+            <select id="runSelect"></select>
+          </label>
+          <label class="field">
+            <span>Eval replay</span>
+            <select id="replaySelect"></select>
+          </label>
+          <label class="toggle">
+            <input id="live" type="checkbox" />
+            <span>Live (re-poll every 10 s)</span>
+          </label>
+          <div id="replayStatus" class="eval"></div>
+        </div>
+        <div class="card note">
+          Replays are move-lists reconstructed through the same deterministic
+          engine used for live play.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span id="selftest" class="selftest">self-test: pending…</span>
+  </footer>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
