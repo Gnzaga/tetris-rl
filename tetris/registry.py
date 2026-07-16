@@ -136,16 +136,37 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def load(path: str | Path = REGISTRY_PATH) -> list[dict]:
-    """Load the registry entries list (empty list if the file is absent)."""
-    path = Path(path)
-    if not path.exists():
-        return []
-    doc = json.loads(path.read_text())
-    return doc.get("entries", []) if isinstance(doc, dict) else doc
+def load(path: str | Path | None = None,
+         shared_path: str | Path | None = None) -> list[dict]:
+    """Load the registry entries list.
+
+    Falls back to the COMMITTED index (``shared/model_registry.json``) when the
+    canonical ``runs/registry.json`` is absent — on a fresh clone (runs/ is
+    gitignored) the lineage must be reconstituted from the committed copy, so
+    that the first post-clone ``save``/``register_from_run`` merges onto the
+    full history instead of truncating it. Returns [] only when neither exists.
+    (Paths default to the module's REGISTRY_PATH / SHARED_INDEX at call time.)
+    """
+    path = REGISTRY_PATH if path is None else path
+    shared_path = SHARED_INDEX if shared_path is None else shared_path
+    for p in (Path(path), Path(shared_path)):
+        if p.exists():
+            doc = json.loads(p.read_text())
+            return doc.get("entries", []) if isinstance(doc, dict) else doc
+    return []
 
 
 def _write_doc(entries: list[dict], path: Path, note: str | None = None) -> None:
+    """Write one registry document. If ``path`` already holds the SAME entry
+    set, the file is left untouched (its ``generated`` timestamp is preserved)
+    so the committed index never churns on no-op rewrites."""
+    if path.exists():
+        try:
+            old = json.loads(path.read_text())
+            if isinstance(old, dict) and old.get("entries") == entries:
+                return
+        except (json.JSONDecodeError, OSError):
+            pass
     doc = {
         "schema_version": SCHEMA_VERSION,
         "generated": _utc_now(),
@@ -156,10 +177,12 @@ def _write_doc(entries: list[dict], path: Path, note: str | None = None) -> None
     path.write_text(json.dumps(doc, indent=2) + "\n")
 
 
-def save(entries: list[dict], path: str | Path = REGISTRY_PATH,
+def save(entries: list[dict], path: str | Path | None = None,
          also_shared: bool = True) -> None:
     """Write ``runs/registry.json`` and (default) the committed
-    ``shared/model_registry.json`` index copy. Raises on schema violations."""
+    ``shared/model_registry.json`` index copy. Raises on schema violations.
+    Files whose entry set is unchanged are left untouched (no timestamp churn)."""
+    path = REGISTRY_PATH if path is None else path
     errs = validate(entries)
     if errs:
         raise ValueError("registry validation failed:\n  " + "\n  ".join(errs))

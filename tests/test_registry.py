@@ -102,6 +102,67 @@ def test_duplicate_ids_flagged():
     assert any("duplicate" in m for m in reg.validate([a, b]))
 
 
+# -- fresh-clone durability (the whole point of the committed index) --------
+
+
+def test_load_falls_back_to_committed_index(tmp_path):
+    """Fresh clone: runs/registry.json absent, shared/model_registry.json
+    present -> load() reconstitutes the full lineage from the committed copy."""
+    if not reg.SHARED_INDEX.exists():
+        pytest.skip("shared index not built — run scripts/registry.py seed")
+    canonical = tmp_path / "runs" / "registry.json"   # does not exist
+    shared = tmp_path / "shared" / "model_registry.json"
+    shared.parent.mkdir(parents=True)
+    shared.write_text(reg.SHARED_INDEX.read_text())
+    entries = reg.load(path=canonical, shared_path=shared)
+    assert len(entries) >= 16, "fallback must return the committed lineage"
+    assert reg.validate(entries) == []
+
+
+def test_register_from_run_merges_onto_committed_lineage(tmp_path, monkeypatch):
+    """Fresh-clone auto-register must ADD an entry, never truncate the lineage
+    (the original bug: load() ignored the committed index, so the first
+    post-clone training run overwrote 16 entries with 1)."""
+    if not reg.SHARED_INDEX.exists():
+        pytest.skip("shared index not built — run scripts/registry.py seed")
+    canonical = tmp_path / "runs" / "registry.json"
+    shared = tmp_path / "shared" / "model_registry.json"
+    shared.parent.mkdir(parents=True)
+    shared.write_text(reg.SHARED_INDEX.read_text())
+    n_before = len(json.loads(shared.read_text())["entries"])
+    monkeypatch.setattr(reg, "REGISTRY_PATH", canonical)
+    monkeypatch.setattr(reg, "SHARED_INDEX", shared)
+
+    # Minimal fake run dir (what register_from_run reads).
+    run_dir = tmp_path / "runs" / "bc_test"
+    (run_dir / "checkpoints").mkdir(parents=True)
+    (run_dir / "checkpoints" / "nn_final.pt").write_bytes(b"")
+    (run_dir / "config.json").write_text(json.dumps(
+        {"created_at": "2026-07-16T20:00:00+00:00", "git_commit": "deadbeef"}))
+    (run_dir / "metrics.jsonl").write_text(json.dumps(
+        {"eval_median_lines": 0.0, "eval_mean_lines": 0.1,
+         "eval_pieces_per_game": 25.0}) + "\n")
+
+    entry = reg.register_from_run(run_dir, family="pixel-bc", domain="gray-128",
+                                  ckpt_name="nn_final", summary="fresh-clone test")
+    assert entry is not None
+    for p in (canonical, shared):
+        got = json.loads(p.read_text())["entries"]
+        assert len(got) == n_before + 1, f"{p.name}: lineage truncated"
+        assert any(e["id"] == "bc_test_final" for e in got)
+
+
+def test_write_doc_no_churn_when_entries_unchanged(tmp_path):
+    """Re-saving an identical entry set must not rewrite the file (no
+    `generated`-timestamp churn in the committed index)."""
+    path = tmp_path / "r.json"
+    entries = [_good_entry()]
+    reg.save(entries, path=path, also_shared=False)
+    before = path.read_text()
+    reg.save(entries, path=path, also_shared=False)
+    assert path.read_text() == before
+
+
 # -- the committed index (shared/model_registry.json) ----------------------
 
 
