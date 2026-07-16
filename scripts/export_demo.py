@@ -17,9 +17,9 @@ The same command works unchanged against the smoke runs used to gate this phase
 npm/onnxruntime-web vendoring step (e.g. when the runtime is already vendored).
 
 Vendoring runs ``npm --prefix demo i onnxruntime-web``, copies the minified
-wasm-only ESM bundle plus the ``.wasm`` binaries it references into
-``demo/vendor/``, then deletes ``demo/node_modules``. The demo sets
-``ort.env.wasm.wasmPaths = './vendor/'`` so it loads them offline.
+wasm-only ESM bundle plus the ``.wasm`` binaries AND ``.mjs`` JS glue modules it
+references at runtime into ``demo/vendor/``, then deletes ``demo/node_modules``.
+The demo sets ``ort.env.wasm.wasmPaths = './vendor/'`` so it loads them offline.
 """
 
 import _pathshim  # noqa: F401
@@ -256,13 +256,20 @@ def vendor_onnxruntime_web(verbose: bool = True) -> list[Path]:
     shutil.copy2(bundle, dst_bundle)
     copied.append(dst_bundle)
 
-    # Copy every .wasm the bundle references (fall back to all wasm binaries).
-    wasm_names = sorted(set(re.findall(r"ort-wasm[\w.-]*\.wasm", bundle.read_text())))
-    wasm_paths = [dist / n for n in wasm_names] or sorted(dist.glob("*.wasm"))
-    for w in wasm_paths:
-        if w.exists():
-            dst = VENDOR_DIR / w.name
-            shutil.copy2(w, dst)
+    # Copy every runtime asset the bundle references: the .wasm binaries AND the
+    # .mjs JS glue modules it loads at runtime (e.g. ort-wasm-simd-threaded.mjs
+    # — without the glue, fresh vendoring leaves browser inference broken).
+    # Fall back to all ort-wasm* assets if the reference parse comes up empty.
+    asset_names = sorted(
+        set(re.findall(r"ort-wasm[\w.-]*\.(?:wasm|mjs)", bundle.read_text()))
+    )
+    asset_paths = [dist / n for n in asset_names] or sorted(
+        [*dist.glob("ort-wasm*.wasm"), *dist.glob("ort-wasm*.mjs")]
+    )
+    for asset in asset_paths:
+        if asset.exists():
+            dst = VENDOR_DIR / asset.name
+            shutil.copy2(asset, dst)
             copied.append(dst)
 
     shutil.rmtree(DEMO_DIR / "node_modules", ignore_errors=True)
