@@ -1,23 +1,23 @@
-"""Frame-layer unit tests (PLAN2.md §3).
+"""Frame-layer unit tests (PLAN2.md §3, amended §1: physical-pose locking).
 
 Covers gravity / lock / spawn semantics on hand-built scenarios, the rotation
-clamp and its failure cases, above-board locks ending the game, frame-layer
-determinism, v1-consistency (the lock sequence replayed through a bare v1 engine
-reproduces identical boards), the straight-drop invariant, and a constructed
-tuck (the one reachable exception to frame_row == drop_row).
+clamp and its failure cases, line clears + scoring, above-board locks ending
+the game with the board unchanged, frame-layer determinism, the straight-drop
+invariant (drop row <= lock row), a constructed tuck locking at its physical
+pose with the exact post-lock board, and the v1-consistency invariant: every
+non-tuck lock transition is bit-identical to v1 engine.step(r, c), cross-checked
+by a parallel bare v1 engine over the non-tuck prefix of random games.
 """
 
 import pytest
 
 from tetris.engine import PIECES, TetrisEngine
-from tetris.features import HEIGHT, WIDTH
+from tetris.features import FULL_ROW, HEIGHT, WIDTH
 from tetris.frame_env import (
     DECISION_PERIOD,
     GRAVITY_PERIOD,
     LEFT,
-    NOOP,
     RIGHT,
-    ROT_CCW,
     ROT_CW,
     FrameEnv,
 )
@@ -25,25 +25,6 @@ from tetris.rng import Mulberry32
 
 # Piece indices (shared/pieces.json order): I O T S Z J L
 I, O, T, S, Z, J, L = range(7)
-
-
-def drive(env, actions, ticks):
-    """Advance `ticks` ticks, applying actions[i] on decision tick i (or NOOP).
-
-    `actions` maps decision-index -> action; missing indices are NOOP. Returns
-    the list of lock events emitted.
-    """
-    locks = []
-    dec_i = 0
-    for _ in range(ticks):
-        if env.is_decision_tick:
-            a = actions.get(dec_i, NOOP) if isinstance(actions, dict) else NOOP
-            env.apply_action(a)
-            dec_i += 1
-        lk = env.tick()
-        if lk is not None:
-            locks.append(lk)
-    return locks
 
 
 def test_spawn_pose():
@@ -60,6 +41,15 @@ def test_spawn_pose():
     env.piece = T  # width 3, height 2
     env._spawn()
     assert env.pose() == (T, 0, 3, -2)
+
+
+def test_piece_supply_matches_v1_engine():
+    # Same seed => same current piece and preview queue as the v1 engine.
+    for seed in (0, 7, 123456):
+        env = FrameEnv(seed=seed)
+        eng = TetrisEngine(seed=seed)
+        assert env.piece == eng.current
+        assert env.preview_pieces() == eng.preview_pieces()
 
 
 def test_decision_and_gravity_cadence():
@@ -130,7 +120,7 @@ def test_slide_blocked_by_stack():
     env.row = 5  # bring it onto the board
     # Fill the cell to the right so a right-slide collides with the stack.
     # O at (rot0, col4, row5) covers cols 4,5 rows 5,6. Right slide -> cols 5,6.
-    env.engine.rows[5] = 1 << 6  # col6 filled at row5
+    env.rows[5] = 1 << 6  # col6 filled at row5
     env.tick_count = 0
     env.apply_action(RIGHT)
     env.tick()
@@ -162,8 +152,7 @@ def test_rotation_fails_on_collision():
     env.col = 5
     env.row = 16  # cells at rows 16..19 in col 5
     # Fill the row that the horizontal rotation would occupy so it collides.
-    # Horizontal I at (rot0, col clamped, row 16) covers row 16 cols col..col+3.
-    env.engine.rows[16] = (1 << WIDTH) - 1  # entire row 16 filled
+    env.rows[16] = (1 << WIDTH) - 1  # entire row 16 filled
     env.tick_count = 0
     env.apply_action(ROT_CW)
     env.tick()
@@ -173,10 +162,10 @@ def test_rotation_fails_on_collision():
 
 def test_lock_on_floor_and_v1_consistency():
     # Drop an I piece straight to the floor with no actions; it must lock at the
-    # v1 straight-drop position and the board must match a bare engine.step.
+    # straight-drop position and the transition must be bit-identical to a bare
+    # v1 engine.step of the same (r, c).
     env = FrameEnv(seed=0)
     env.piece = I
-    env.engine.current = I  # keep engine's locking piece in sync with the frame
     env._spawn()  # col 3, row -1
     locks = []
     # Enough ticks for the I to fall 20 rows (20 * 24 = 480) and lock.
@@ -190,44 +179,50 @@ def test_lock_on_floor_and_v1_consistency():
     assert lock["r"] == 0 and lock["c"] == 3
     assert lock["tuck"] is False
     # Bottom row filled at cols 3..6.
-    assert env.engine.rows[HEIGHT - 1] == 0b0000_1111_000  # cols 3,4,5,6
+    assert env.rows[HEIGHT - 1] == 0b0000_1111_000  # cols 3,4,5,6
+    assert env.pieces == 1
 
-    # v1-consistency: replay the derived placement through a bare engine.
+    # v1-consistency: the same placement through a bare v1 engine.
     bare = TetrisEngine(seed=0)
     bare.current = I
     bare.step(lock["r"], lock["c"])
-    assert bare.rows == env.engine.rows
+    assert bare.rows == env.rows
 
 
-def test_straight_drop_invariant_no_tuck():
-    # Over a full random game the engine drop row never exceeds the frame row.
-    env = FrameEnv(seed=3)
-    arng = Mulberry32(3)
-    for _ in range(3000):
-        if env.is_decision_tick:
-            env.apply_action(int(arng.next_float() * 5))
-        # tick() asserts drop <= row internally; reaching here means it held.
-        env.tick()
-
-
-def test_constructed_tuck():
-    # A vertical I piece slides under an overhang, resting deeper than any v1
-    # straight drop of (rot=1, col=1) could reach. The lock still defers to
-    # engine.step so the board stays v1-consistent, and the tuck flag is set.
+def test_line_clear_and_score():
+    # Bottom row full except cols 3..6; a flat I locks there and clears it.
     env = FrameEnv(seed=0)
     env.piece = I
-    env.engine.current = I  # sync engine's locking piece with the frame
+    env._spawn()  # rot 0, col 3
+    env.rows[HEIGHT - 1] = FULL_ROW ^ (0b1111 << 3)
+    lock = None
+    for _ in range(GRAVITY_PERIOD * 22):
+        lk = env.tick()
+        if lk is not None:
+            lock = lk
+            break
+    assert lock is not None
+    assert lock["lines_after"] == 1
+    assert env.lines == 1
+    assert env.score == 100  # CLEAR_POINTS[1] * 100
+    assert env.rows == [0] * HEIGHT  # cleared row shifted away, board empty
+
+
+def test_constructed_tuck_locks_at_physical_pose():
+    # A vertical I slides under an overhang and locks BELOW the straight-drop
+    # row, at its true physical pose (amended §1: what the camera sees is what
+    # locks). Exact post-lock board asserted.
+    env = FrameEnv(seed=0)
+    env.piece = I
     env._spawn()
-    env.engine.rows = [0] * HEIGHT
-    env.engine.rows[10] = 1 << 1  # overhang: col1 filled at row 10, empty below
+    env.rows = [0] * HEIGHT
+    env.rows[10] = 1 << 1  # overhang: col1 filled at row 10, empty below
     env.rot = 1  # vertical I, width 1
     env.col = 0  # open column
     env.row = 15  # cells rows 15..18 in col 0, below the overhang
 
-    # Engine straight-drop for (rot1, col1) rests ON TOP of the row-10 block, at
-    # rows 6..9 — far above where the tucked piece will actually rest.
-    drop_col1 = env.engine._drop_row(PIECES[I][1], 1, env.engine._col_top())
-    assert drop_col1 == 6
+    # Straight drop for (rot1, col1) rests ON TOP of the overhang, rows 6..9.
+    assert env._straight_drop_row(1, 1) == 6
 
     # Force a decision tick and slide right, under the overhang.
     env.tick_count = 0
@@ -237,7 +232,7 @@ def test_constructed_tuck():
     assert env.col == 1  # slid under the overhang (destination cells free)
     assert env.row == 15
 
-    # Drive gravity until it locks.
+    # Drive gravity until it locks: one more descent to rows 16..19 (floor).
     lock = None
     for _ in range(GRAVITY_PERIOD * 6):
         lk = env.tick()
@@ -246,54 +241,48 @@ def test_constructed_tuck():
             break
     assert lock is not None
     assert lock["r"] == 1 and lock["c"] == 1
-    assert lock["tuck"] is True  # rested deeper than the straight drop
-    assert env.game_over is False  # the derived placement is legal (on-board)
+    assert lock["tuck"] is True
+    assert env.game_over is False
+    assert env.pieces == 1
 
-    # v1-consistency holds anyway: the board equals a bare straight drop of the
-    # derived placement onto the same pre-lock board (piece lands on the block,
-    # NOT at the tucked-deep visual position).
-    bare = TetrisEngine(seed=0)
-    bare.rows = [0] * HEIGHT
-    bare.rows[10] = 1 << 1
-    bare.current = I
-    bare.step(lock["r"], lock["c"])
-    assert bare.rows == env.engine.rows
-    # The engine locked the I at the straight-drop rows 6..9, not rows 16..19.
-    assert all((env.engine.rows[r] >> 1) & 1 for r in range(6, 11))
+    # Exact post-lock board: col1 filled at rows 10 (overhang) and 16..19 —
+    # the piece stayed where the camera saw it, no teleport to rows 6..9.
+    expected = [0] * HEIGHT
+    for r in (10, 16, 17, 18, 19):
+        expected[r] = 1 << 1
+    assert env.rows == expected
 
 
 def test_above_board_lock_is_game_over():
-    # A near-full column forces a lock whose piece sits above row 0 -> the v1
-    # engine reports the placement illegal and the game ends.
+    # A full column forces a lock whose cells sit above row 0 -> game over with
+    # the board left unchanged (bit-identical to the v1 illegal-step outcome).
     env = FrameEnv(seed=0)
     env.piece = I
-    env.engine.current = I  # sync engine's locking piece with the frame
     env._spawn()
-    # Fill col 3 entirely from row 0 down, so a vertical I above it cannot fit.
     env.rot = 1  # vertical I in a single column
     env.col = 3
     env.row = -4  # cells rows -4..-1, fully above the board
     for r in range(HEIGHT):
-        env.engine.rows[r] = 1 << 3  # col 3 filled at every row
+        env.rows[r] = 1 << 3  # col 3 filled at every row
     # Gravity descent immediately collides (row -3 puts a cell at row 0 = filled).
     env.tick_count = 0
     env.gravity_counter = GRAVITY_PERIOD - 1  # next tick triggers gravity
     lk = env.tick()
     assert lk is not None
     assert env.game_over is True
-    assert env.engine.game_over is True
-    # Board unchanged by the illegal lock.
-    assert all(env.engine.rows[r] == (1 << 3) for r in range(HEIGHT))
+    assert env.pieces == 0  # not counted, mirroring v1 illegal step
+    # Board unchanged by the above-board lock.
+    assert all(env.rows[r] == (1 << 3) for r in range(HEIGHT))
 
 
 def test_game_over_freezes_state():
     env = FrameEnv(seed=0)
     env.game_over = True
-    rows_before = list(env.engine.rows)
+    rows_before = list(env.rows)
     tc = env.tick_count
     assert env.tick() is None
     assert env.tick_count == tc + 1  # cadence still advances
-    assert env.engine.rows == rows_before
+    assert env.rows == rows_before
 
 
 def test_determinism():
@@ -306,25 +295,45 @@ def test_determinism():
                 env.apply_action(int(arng.next_float() * 5))
             lk = env.tick()
             trace.append((env.piece, env.rot, env.col, env.row, env.gravity_counter,
-                          tuple(env.engine.rows), lk["tick"] if lk else -1))
+                          tuple(env.rows), lk["tick"] if lk else -1))
         return trace
 
     assert run(7) == run(7)
     assert run(7) != run(8)
 
 
-def test_frame_lock_sequence_matches_bare_engine():
-    # v1-consistency at scale: replay every derived lock placement from a random
-    # frame game through a bare v1 engine and assert identical final board/lines.
+def test_v1_consistency_on_non_tuck_prefix():
+    # v1-consistency invariant (amended §1): every non-tuck lock transition is
+    # bit-identical to v1 engine.step(r, c). Cross-checked by a parallel bare
+    # v1 engine over the non-tuck prefix of each random game (boards
+    # legitimately diverge after the first physical tuck lock).
+    checked = 0
+    tucks_seen = 0
     for seed in range(15):
         env = FrameEnv(seed=seed)
         arng = Mulberry32(seed)
         bare = TetrisEngine(seed=seed)
+        cross_check = True
         for _ in range(3000):
             if env.is_decision_tick:
                 env.apply_action(int(arng.next_float() * 5))
             lk = env.tick()
-            if lk is not None and not bare.game_over:
-                bare.step(lk["r"], lk["c"])
-        assert bare.rows == env.engine.rows, f"board mismatch seed {seed}"
-        assert bare.lines == env.engine.lines, f"lines mismatch seed {seed}"
+            if lk is None or not cross_check:
+                continue
+            if lk["tuck"]:
+                tucks_seen += 1
+                cross_check = False
+                continue
+            if bare.game_over:
+                cross_check = False
+                continue
+            bare.step(lk["r"], lk["c"])
+            assert bare.rows == env.rows, f"board mismatch seed {seed} @tick {lk['tick']}"
+            assert bare.lines == env.lines, f"lines mismatch seed {seed} @tick {lk['tick']}"
+            checked += 1
+            if bare.game_over:
+                # v1's "new piece has no legal placement" rule has no frame-layer
+                # equivalent; comparisons after this point are meaningless.
+                cross_check = False
+    assert checked >= 50  # the invariant was exercised substantially
+    assert tucks_seen >= 1  # random play reaches the tuck path

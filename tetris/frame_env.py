@@ -1,7 +1,15 @@
-"""Frame layer over the v1 atomic engine (PLAN2.md §1).
+"""Frame layer with physical-pose locking (PLAN2.md §1, amended).
 
-The v1 :class:`~tetris.engine.TetrisEngine` remains ground truth for lock,
-line-clear, and game-over. This layer adds real-time semantics on top of it:
+Real-time keypress-level Tetris on the v1 board representation. The frame layer
+owns its board (20 rows of 10-bit ints, row 0 top) and applies locks itself at
+the piece's TRUE PHYSICAL POSE — what the camera sees is what locks. It reuses
+the frozen v1 building blocks read-only: piece rotation tables
+(:data:`tetris.engine.PIECES`), :class:`~tetris.rng.Mulberry32` +
+:class:`~tetris.rng.SevenBag` piece supply (identical queue discipline to the
+v1 engine, so a given seed yields the v1 piece sequence), and the v1
+``CLEAR_POINTS`` scoring table.
+
+Semantics (frozen §1):
 
 * Logic runs at 30 Hz (ticks).
 * Gravity: the active piece descends 1 row every ``GRAVITY_PERIOD`` (24) ticks.
@@ -15,39 +23,35 @@ line-clear, and game-over. This layer adds real-time semantics on top of it:
   board row -1 (fully above the board), on the tick after lock. A spawn pose
   that collides ends the game.
 * Lock: when a gravity descent would collide, the piece locks at its current
-  pose. The equivalent v1 placement is simply ``(rot, col)`` — under
-  gravity-only descent (no soft drop, no reachable overhang tuck) the frame
-  resting row is exactly the v1 straight-drop resting row. The frame layer
-  calls ``engine.step(rot, col)`` so the board transition is v1-consistent by
-  construction; an above-row-0 lock maps to an engine-illegal placement and
-  ends the game.
+  physical pose: place cells, remove full rows shifting above down, score via
+  ``CLEAR_POINTS``, draw the next piece from the same 7-bag. Game over iff any
+  locked cell has row < 0 (the board is left unchanged, mirroring the v1
+  engine's illegal-placement outcome bit-for-bit) or the next spawn pose
+  collides.
 
-Straight-drop invariant (and its one exception: tucks)
-------------------------------------------------------
-For the common case the frame resting row equals ``engine._drop_row(rot, col)``:
-a piece descends straight down and rests exactly where a v1 straight drop would.
+Tucks and the v1-consistency invariant
+--------------------------------------
+Because a slide only checks the *destination* cells and there are 8 decision
+ticks per gravity row, a falling piece can slide sideways under an overhang and
+rest deeper than the v1 straight drop of its (rot, col) — a "tuck". Locks
+resolve at that physical pose (no board teleport); the lock event carries a
+``tuck`` flag (``True`` iff the lock row differs from the straight-drop row).
 
-There is one reachable exception. Because a slide only checks the *destination*
-cells for collisions (frozen §1 semantics) and there are 8 decision ticks per
-gravity row, a piece falling down an open column can slide sideways *under* an
-overhang into a covered cell — a "tuck". Straight-drop-only play does create
-overhangs (S/Z/T pieces on uneven terrain), so tucks are genuinely reachable and
-occur in ordinary random play. A tucked piece rests deeper than any v1 straight
-drop of its final ``(rot, col)`` can reach, so the true, always-holding invariant
-is ``engine._drop_row(rot, col) <= frame_row`` (straight drop is the *highest*
-reachable rest); equality is the no-tuck case.
-
-The frozen spec mandates locking via ``engine.step(rot, col)`` regardless, so the
-board transition stays v1-consistent by construction in both cases — on a tuck
-the engine locks the piece at the (higher) straight-drop row. The lock event
-carries a ``tuck`` flag so this is observable. See ``tests/test_frame_env.py``
-for the invariant test, a constructed tuck, and rotation/clamp/above-board edges.
+The v1-consistency invariant — fixture-tested here and in
+``tests_js/parity_v2.test.mjs`` — is: whenever the lock pose equals the
+straight-drop pose (every non-tuck lock, the overwhelmingly common case), the
+board/lines transition is bit-identical to v1 ``engine.step(r, c)``. Straight
+drop is the highest reachable rest, so ``straight_drop_row <= lock_row`` always
+holds (asserted at every lock).
 """
 
 from __future__ import annotations
 
-from tetris.engine import PIECES, TetrisEngine
-from tetris.features import HEIGHT, WIDTH
+from collections import deque
+
+from tetris.engine import CLEAR_POINTS, PIECES
+from tetris.features import FULL_ROW, HEIGHT, WIDTH
+from tetris.rng import Mulberry32, SevenBag
 
 # Frozen timing constants (PLAN2.md §1).
 TICK_HZ = 30
@@ -60,7 +64,7 @@ NOOP, LEFT, RIGHT, ROT_CW, ROT_CCW = range(5)
 
 
 class FrameEnv:
-    """Real-time frame layer wrapping the v1 engine (see module docstring)."""
+    """Real-time frame layer with physical-pose locking (module docstring)."""
 
     def __init__(self, seed: int = 0, preview: int = 5):
         self.reset(seed, preview)
@@ -68,17 +72,36 @@ class FrameEnv:
     # -- lifecycle -----------------------------------------------------------
 
     def reset(self, seed: int, preview: int = 5) -> "FrameEnv":
-        self.engine = TetrisEngine(seed=seed, preview=preview)
+        self.rng = Mulberry32(seed)
+        self.bag = SevenBag(self.rng)
+        self.preview = preview
+        self.rows: list[int] = [0] * HEIGHT
+        # Piece supply: identical queue discipline to the v1 engine, so the
+        # piece sequence for a seed matches v1 exactly.
+        self.queue: deque[int] = deque()
+        self._fill_queue()
+        self.piece: int = self.queue.popleft()
+        self._fill_queue()
+        self.lines = 0
+        self.pieces = 0
+        self.score = 0  # sum of CLEAR_POINTS[lines] * 100, v1 demo convention
         self.tick_count = 0
         self.gravity_counter = 0
         self.game_over = False
         self._pending = NOOP
-        self.piece = self.engine.current
         self._spawn()
-        # Spawn pose is fully above the board, so this is defensive only.
+        # Spawn pose is fully above an empty board, so this is defensive only.
         if self._collides(self.piece, self.rot, self.col, self.row):
             self.game_over = True
         return self
+
+    def _fill_queue(self) -> None:
+        while len(self.queue) < self.preview:
+            self.queue.append(self.bag.next_piece())
+
+    def preview_pieces(self) -> list[int]:
+        """The next `preview` piece indices (does not include the active piece)."""
+        return list(self.queue)[: self.preview]
 
     def _spawn(self) -> None:
         rot0 = PIECES[self.piece][0]
@@ -92,18 +115,6 @@ class FrameEnv:
     def is_decision_tick(self) -> bool:
         return self.tick_count % DECISION_PERIOD == 0
 
-    @property
-    def rows(self) -> list[int]:
-        return self.engine.rows
-
-    @property
-    def lines(self) -> int:
-        return self.engine.lines
-
-    @property
-    def pieces(self) -> int:
-        return self.engine.pieces
-
     def pose(self) -> tuple[int, int, int, int]:
         """Active piece as (piece_id, rot, col, row)."""
         return (self.piece, self.rot, self.col, self.row)
@@ -113,7 +124,7 @@ class FrameEnv:
     def _collides(self, piece: int, rot: int, col: int, row: int) -> bool:
         """True if placing `piece` at (rot, col, row) overlaps a wall, the
         floor, or a filled stack cell. Cells above the board (row < 0) are free."""
-        rows = self.engine.rows
+        rows = self.rows
         for ro, co in PIECES[piece][rot].cells:
             rr = row + ro
             cc = col + co
@@ -124,6 +135,23 @@ class FrameEnv:
             if rr >= 0 and (rows[rr] >> cc) & 1:
                 return True
         return False
+
+    def _straight_drop_row(self, rot_idx: int, col: int) -> int:
+        """v1 straight-drop resting top-row for the active piece at (rot, col)
+        on the current board (may be negative => v1-illegal)."""
+        rot = PIECES[self.piece][rot_idx]
+        t = HEIGHT
+        for pc in range(rot.width):
+            c = col + pc
+            top = HEIGHT
+            for r in range(HEIGHT):
+                if (self.rows[r] >> c) & 1:
+                    top = r
+                    break
+            v = top - 1 - rot.bottom[pc]
+            if v < t:
+                t = v
+        return t
 
     # -- actions -------------------------------------------------------------
 
@@ -179,31 +207,55 @@ class FrameEnv:
     def _lock_and_spawn(self) -> dict:
         rot_idx = self.rot
         col = self.col
+        row = self.row
         rot = PIECES[self.piece][rot_idx]
-        # Straight-drop invariant: the v1 straight-drop row is the highest
-        # reachable rest, so it never sits below the frame resting row. Equality
-        # is the no-tuck case; drop < row means the piece tucked under an
-        # overhang (see module docstring). The lock always defers to
-        # engine.step(rot, col) so the board transition stays v1-consistent.
-        drop = self.engine._drop_row(rot, col, self.engine._col_top())
-        assert drop <= self.row, (
-            f"straight-drop invariant violated: engine drop row {drop} > frame "
-            f"row {self.row} (piece {self.piece} rot {rot_idx} col {col})"
-        )
 
-        self.engine.step(rot_idx, col)
+        # Straight drop is the highest reachable rest; deeper == tuck.
+        drop = self._straight_drop_row(rot_idx, col)
+        assert drop <= row, (
+            f"straight-drop invariant violated: drop row {drop} > lock row "
+            f"{row} (piece {self.piece} rot {rot_idx} col {col})"
+        )
+        tuck = drop != row
+
+        # Any locked cell above the board => game over. The bbox top row always
+        # contains a cell (tight bounding boxes), so row < 0 is the exact test.
+        # Board left unchanged — bit-identical to the v1 illegal-step outcome.
+        if row < 0:
+            self.game_over = True
+            return {
+                "tick": self.tick_count,
+                "r": rot_idx,
+                "c": col,
+                "lines_after": self.lines,
+                "tuck": tuck,
+            }
+
+        # Physical lock: place cells, clear full rows shifting above down
+        # (identical row surgery to v1 engine._apply).
+        for ro, co in rot.cells:
+            self.rows[row + ro] |= 1 << (col + co)
+        lines = 0
+        for r in range(row, row + rot.height):
+            if self.rows[r] == FULL_ROW:
+                lines += 1
+        if lines:
+            kept = [v for v in self.rows if v != FULL_ROW]
+            self.rows = [0] * lines + kept
+        self.lines += lines
+        self.score += CLEAR_POINTS[lines] * 100
+        self.pieces += 1
         lock = {
             "tick": self.tick_count,
             "r": rot_idx,
             "c": col,
-            "lines_after": self.engine.lines,
-            "tuck": drop != self.row,
+            "lines_after": self.lines,
+            "tuck": tuck,
         }
-        if self.engine.game_over:
-            self.game_over = True
-            return lock
 
-        self.piece = self.engine.current
+        # Draw the next piece and spawn; a colliding spawn pose ends the game.
+        self.piece = self.queue.popleft()
+        self._fill_queue()
         self._spawn()
         if self._collides(self.piece, self.rot, self.col, self.row):
             self.game_over = True

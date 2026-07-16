@@ -4,11 +4,13 @@ For each of NUM_SEEDS seeds, drive the frame env for NUM_TICKS ticks with a
 seeded pseudo-random action sequence and record, at every decision tick, the
 tick index, a 32-bit FNV-1a board hash (v1 scheme), and the active piece pose
 (piece id, rot, col, row) plus the gravity counter; also record every lock event
-with its derived (rotation, column), the cumulative lines after the lock, and a
-tuck flag (1 if the piece rested deeper than a v1 straight drop — see
-tetris/frame_env.py). The JS suite (tests_js/parity_v2.test.mjs) regenerates the
-same action stream from the seed, replays it through the JS frame env, and
-asserts every recorded field matches bit-for-bit.
+with its (rotation, column), the cumulative lines after the lock, and a tuck
+flag (1 if the piece locked deeper than the v1 straight drop of its (rot, col)
+— physical-pose locking, see tetris/frame_env.py). The JS suite
+(tests_js/parity_v2.test.mjs) regenerates the same action stream from the seed,
+replays it through the JS frame env, asserts every recorded field matches
+bit-for-bit, and cross-checks the v1-consistency invariant against a parallel
+bare v1 engine over the non-tuck prefix of each game.
 
 Action scheme (frozen, regenerable in JS): a separate Mulberry32 seeded with the
 fixture seed; at each decision tick, action = floor(next_float() * 5), mapped to
@@ -73,6 +75,7 @@ def play_fixture(seed: int) -> dict:
         "final": {
             "lines": int(env.lines),
             "pieces": int(env.pieces),
+            "score": int(env.score),
             "game_over": bool(env.game_over),
             "ticks": NUM_TICKS,
         },
