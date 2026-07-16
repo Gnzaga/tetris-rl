@@ -15,6 +15,7 @@
     <nav class="tabs">
       <button id="tabPlay" class="tab active">Play</button>
       <button id="tabReplay" class="tab">Replay</button>
+      <button id="tabPixel" class="tab hidden">Pixel Agent</button>
     </nav>
   </header>
 
@@ -77,8 +78,106 @@
         </div>
 
         <div class="card">
+          <div class="row-label">Keypresses (derived)</div>
+          <div id="playKeypad"></div>
+        </div>
+
+        <div class="card">
           <div class="row-label">Training curve · median lines</div>
           <canvas id="curve" width="300" height="130"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== PIXEL AGENT ===================== -->
+    <section id="panelPixel" class="panel hidden">
+      <div class="stage">
+        <canvas id="pixelBoard" width="220" height="440"></canvas>
+        <div class="pixel-side">
+          <div class="preview-wrap">
+            <div class="preview-label">NEXT</div>
+            <canvas id="pixelPreview" width="96" height="80"></canvas>
+          </div>
+          <div class="eye-wrap">
+            <div class="preview-label">MODEL'S EYE · 96×96</div>
+            <canvas id="pixelEye" width="192" height="192"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar">
+        <div class="card">
+          <label class="field">
+            <span>Pixel agent / milestone</span>
+            <select id="pixelAgent"></select>
+          </label>
+          <div id="pixelEval" class="eval"></div>
+          <p class="note">
+            Pixel input, keypress output, real time. Best-effort agent (Phase D
+            gate not met) — expect short games.
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="row-label">Speed</div>
+          <div class="speeds">
+            <button class="pixel-speed-btn" data-speed="1">1×</button>
+            <button class="pixel-speed-btn" data-speed="4">4×</button>
+          </div>
+          <div class="controls">
+            <button id="pixelPause">Pause</button>
+            <button id="pixelRestart">Restart</button>
+          </div>
+          <div class="control-row">
+            <label class="field inline">
+              <span>Seed</span>
+              <input id="pixelSeed" type="number" value="1" min="0" />
+            </label>
+            <label class="toggle">
+              <input id="pixelActToggle" type="checkbox" checked />
+              <span>Activations</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="row-label">Stats</div>
+          <dl class="stats">
+            <div><dt>Lines</dt><dd id="pxLines">0</dd></div>
+            <div><dt>Pieces</dt><dd id="pxPieces">0</dd></div>
+            <div><dt>Decisions</dt><dd id="pxDecisions">0</dd></div>
+            <div><dt>Action</dt><dd id="pxAction">—</dd></div>
+            <div><dt>Decision ms</dt><dd id="pxMs">0.00</dd></div>
+            <div><dt>Predicted</dt><dd id="pxAux">—</dd></div>
+          </dl>
+        </div>
+
+        <div class="card">
+          <div class="row-label">Keypresses</div>
+          <div id="pixelKeypad"></div>
+        </div>
+      </div>
+
+      <div id="pixelActivations" class="pixel-activations">
+        <div class="act-card">
+          <div class="row-label">conv1 · 16 @ 23×23</div>
+          <canvas id="actConv1" width="300" height="300"></canvas>
+        </div>
+        <div class="act-card">
+          <div class="row-label">conv2 · 32 @ 10×10</div>
+          <canvas id="actConv2" width="300" height="150"></canvas>
+        </div>
+        <div class="act-card">
+          <div class="row-label">conv3 · 32 @ 8×8</div>
+          <canvas id="actConv3" width="300" height="150"></canvas>
+        </div>
+        <div class="act-card">
+          <div class="row-label">FC · 256</div>
+          <canvas id="actFc" width="176" height="176"></canvas>
+        </div>
+        <div class="act-card act-wire">
+          <div class="row-label">FC → action head (weight × activation)</div>
+          <canvas id="actWire" width="300" height="260"></canvas>
         </div>
       </div>
     </section>
@@ -114,6 +213,7 @@
 
   <footer class="statusbar">
     <span id="selftest" class="selftest">self-test: pending…</span>
+    <span id="selftestPixel" class="selftest hidden">pixel self-test: pending…</span>
   </footer>
 
   <script type="module" src="./js/main.js"></script>

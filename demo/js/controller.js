@@ -51,6 +51,11 @@ export class Controller {
     this.deciding = false;
     this.dead = false;
     this.lastDecisionMs = 0;
+    // Optional virtual-keypress hook (Phase F keypad overlay). Fires "up" on each
+    // animated rotation step and "left"/"right" on each slide step — derived from
+    // the display animation only; the engine is never touched. Default no-op so
+    // v1 behaviour and the parity tests are unaffected.
+    this.onPress = () => {};
   }
 
   async _run() {
@@ -109,6 +114,7 @@ export class Controller {
       if (a.rotShown !== a.targetRot) {
         a.rotShown = (a.rotShown + 1) % rots.length;
         a.rotObj = rots[a.rotShown];
+        this.onPress("up");
       }
       if (a.rotShown === a.targetRot) {
         a.rotObj = rots[a.targetRot];
@@ -117,8 +123,8 @@ export class Controller {
       return;
     }
     if (a.phase === "translate") {
-      if (a.colShown < a.targetCol) a.colShown++;
-      else if (a.colShown > a.targetCol) a.colShown--;
+      if (a.colShown < a.targetCol) { a.colShown++; this.onPress("right"); }
+      else if (a.colShown > a.targetCol) { a.colShown--; this.onPress("left"); }
       if (a.colShown === a.targetCol) a.phase = "descend";
       return;
     }

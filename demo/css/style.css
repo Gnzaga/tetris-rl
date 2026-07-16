@@ -124,3 +124,62 @@ canvas#curve { width: 100%; height: auto; background: #0d1017; border-radius: 6p
 .selftest.pass { color: #5fd35a; }
 .selftest.fail { color: #f0584a; }
 .selftest.warn { color: #f0a04a; }
+
+/* ===================== Pixel Agent tab (PLAN2.md §8) ===================== */
+.pixel-side { display: flex; flex-direction: column; gap: 14px; }
+.eye-wrap { display: flex; flex-direction: column; gap: 6px; }
+canvas#pixelBoard { background: #0b0e15; border: 1px solid var(--line); border-radius: 10px; }
+canvas#pixelPreview { background: #0d1017; border: 1px solid var(--line); border-radius: 8px; }
+canvas#pixelEye {
+  image-rendering: pixelated;
+  background: #000;
+  border: 1px solid var(--accent2);
+  border-radius: 8px;
+  box-shadow: 0 0 18px rgba(180, 108, 240, 0.18);
+}
+.note { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 10px 0 0; }
+.speeds { display: flex; gap: 8px; margin-bottom: 10px; }
+.pixel-speed-btn {
+  background: transparent; border: 1px solid var(--line); color: var(--muted);
+  border-radius: 8px; padding: 7px 12px; cursor: pointer; font-size: 13px;
+}
+.pixel-speed-btn:hover { border-color: var(--accent2); }
+.pixel-speed-btn.active { border-color: var(--accent); background: rgba(63, 208, 224, 0.12); color: var(--accent); }
+
+/* Activation view */
+.pixel-activations {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 14px; width: 100%; margin-top: 6px;
+}
+.pixel-activations.hidden { display: none; }
+.act-card {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 12px;
+}
+.act-card canvas { width: 100%; height: auto; background: #0b0e15; border-radius: 6px; display: block; }
+.act-wire { grid-column: span 2; }
+
+/* Keypad overlay */
+.keypad { display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.keypad-grid {
+  display: grid; grid-template-columns: repeat(3, 34px); grid-template-rows: repeat(3, 34px);
+  gap: 6px;
+}
+.key {
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 8px; color: var(--muted);
+  font-size: 16px; background: #0d1017; transition: all 90ms ease;
+}
+.key-empty { border: none; background: transparent; }
+.key-noop { font-size: 20px; }
+.key.lit {
+  color: #0a0c11; background: var(--accent); border-color: var(--accent);
+  box-shadow: 0 0 14px rgba(63, 208, 224, 0.6); transform: scale(1.06);
+}
+.keypad-tape {
+  width: 100%; min-height: 20px; font-family: ui-monospace, monospace; font-size: 14px;
+  color: var(--accent2); letter-spacing: 2px; overflow: hidden; white-space: nowrap;
+  direction: rtl; text-align: left;
+}
+.statusbar .selftest + .selftest { margin-left: 18px; }
+.selftest.hidden { display: none; }

@@ -1,5 +1,8 @@
-// Demo entry point (PLAN.md §10): wiring, the 30 Hz game loop, controls,
-// self-test, and tab switching.
+// Demo entry point (PLAN.md §10 + PLAN2.md §8): wiring, the 30 Hz game loop,
+// controls, self-tests, and tab switching. The v1 Play/Replay flow is unchanged;
+// the Pixel Agent tab (shown only when the manifest carries a `pixel_agents`
+// block) adds the real-time pixel-input / keypress agent with the model's-eye
+// inset, MarI/O activation view, and keypress overlay.
 
 import { makeEngine } from "./engine.js";
 import { Controller } from "./controller.js";
@@ -16,6 +19,23 @@ import {
   StatsTracker,
 } from "./ui.js";
 import { ReplayTab } from "./replay.js";
+import { makeFrameEnv } from "./frame_env.js";
+import { makeRenderObs } from "./render_obs.js";
+import {
+  PixelAgent,
+  PixelController,
+  parsePixelManifest,
+  stackToTensor,
+  ACTION_TO_KEY,
+} from "./pixel_agent.js";
+import {
+  drawFeatureMaps,
+  drawFcStrip,
+  drawWireGraph,
+  drawObsInset,
+} from "./activations.js";
+import { Keypad } from "./keypad.js";
+import { renderPixelBoard, renderPixelPreview } from "./pixel_ui.js";
 
 const TICK = 1000 / 30; // 33.33 ms logic step
 const SPEED_FACTORS = { "1": 1, "4": 4, "20": 20 };
@@ -30,6 +50,7 @@ const state = {
   pumping: false,
   acc: 0,
   lastTime: 0,
+  showActivations: true,
 };
 
 let TetrisEngine, PIECES;
@@ -40,6 +61,16 @@ let playScene = null;
 let replayTab = null;
 const playStats = new StatsTracker();
 
+// v2 pixel state.
+let pixelMeta = null;      // parsed pixel_agents block (null => v1-only manifest)
+let FrameEnv = null;
+let renderEnv = null;
+let pixelScene = null;
+const pixelSessionCache = new Map();
+let playKeypad = null;
+let pixelKeypad = null;
+let lastDrawnDecision = -1;
+
 const els = {};
 
 function cacheEls() {
@@ -47,8 +78,14 @@ function cacheEls() {
     "board", "preview", "curve", "agent", "agentEval",
     "pause", "step", "restart", "seed", "heatmap",
     "statLines", "statScore", "statPieces", "statPps", "statMs", "statParams", "statSize",
-    "selftest", "tabPlay", "tabReplay", "panelPlay", "panelReplay",
+    "selftest", "selftestPixel", "tabPlay", "tabReplay", "tabPixel",
+    "panelPlay", "panelReplay", "panelPixel",
     "runSelect", "replaySelect", "live", "replayStatus", "replayBoard",
+    "playKeypad",
+    "pixelBoard", "pixelPreview", "pixelEye", "pixelAgent", "pixelEval",
+    "pixelPause", "pixelRestart", "pixelSeed", "pixelActToggle", "pixelKeypad",
+    "pxLines", "pxPieces", "pxDecisions", "pxAction", "pxMs", "pxAux",
+    "pixelActivations", "actConv1", "actConv2", "actConv3", "actFc", "actWire",
   ]) {
     els[id] = $(id);
   }
@@ -81,6 +118,10 @@ async function buildPlayScene() {
   const controller = new Controller(engine, runner, PIECES, (info, ms) => {
     playStats.onCommit(ms, info.linesCleared);
   });
+  if (playKeypad) {
+    playKeypad.reset();
+    controller.onPress = (key) => playKeypad.press(key);
+  }
   await controller.begin();
   playScene = { engine, controller, stats: playStats, runner, kind: "play" };
   updateAgentEval(agent);
@@ -100,7 +141,54 @@ function updateAgentEval(agent) {
 }
 
 function activeScene() {
-  return state.activeTab === "play" ? playScene : (replayTab ? replayTab.scene : null);
+  if (state.activeTab === "play") return playScene;
+  if (state.activeTab === "pixel") return pixelScene;
+  return replayTab ? replayTab.scene : null;
+}
+
+// ---- Pixel agent scene -----------------------------------------------------
+
+function pixelSeed() {
+  const v = parseInt(els.pixelSeed.value, 10);
+  return Number.isFinite(v) ? v >>> 0 : 1;
+}
+
+async function getPixelSession(agent) {
+  let cached = pixelSessionCache.get(agent.id);
+  if (cached) return cached;
+  const path = "./models/" + agent.path;
+  const session = await ort.InferenceSession.create(path, { executionProviders: ["wasm"] });
+  const pa = new PixelAgent(ort, session, pixelMeta);
+  pixelSessionCache.set(agent.id, pa);
+  return pa;
+}
+
+async function buildPixelScene() {
+  if (!pixelMeta || !ort) return;
+  const agent = pixelMeta.byId[els.pixelAgent.value] || pixelMeta.byId[pixelMeta.final];
+  const seed = pixelSeed();
+  const pa = await getPixelSession(agent);
+  const env = new FrameEnv(seed);
+  if (pixelKeypad) pixelKeypad.reset();
+  const controller = new PixelController(env, renderEnv, pa, {
+    onPress: (action) => { if (pixelKeypad) pixelKeypad.press(ACTION_TO_KEY[action]); },
+  });
+  await controller.begin();
+  pixelScene = { env, controller, kind: "pixel", agent };
+  lastDrawnDecision = -1;
+  updatePixelEval(agent);
+}
+
+function updatePixelEval(agent) {
+  const e = agent.eval || {};
+  const bits = [];
+  if (e.median_lines !== undefined && e.median_lines !== null)
+    bits.push(`median ${Math.round(e.median_lines)} lines`);
+  if (e.mean_lines !== undefined && e.mean_lines !== null)
+    bits.push(`mean ${Number(e.mean_lines).toFixed(2)}`);
+  if (e.pieces_per_game !== undefined && e.pieces_per_game !== null)
+    bits.push(`${Math.round(e.pieces_per_game)} pc/game`);
+  els.pixelEval.textContent = bits.join(" · ") || "no eval stats";
 }
 
 // ---- Game loop -------------------------------------------------------------
@@ -125,10 +213,12 @@ function frame(now) {
   const scene = activeScene();
   if (scene && scene.controller && !state.paused) {
     const c = scene.controller;
-    if (state.speed === "MAX") {
+    // MAX is a v1-only Play/Replay affordance (pixel is real-time by definition).
+    if (state.speed === "MAX" && scene.kind !== "pixel") {
       if (!state.pumping) pumpMax(scene);
     } else {
-      state.acc += Math.min(dt, 200) * SPEED_FACTORS[state.speed];
+      const factor = SPEED_FACTORS[state.speed] || 1;
+      state.acc += Math.min(dt, 200) * factor;
       let guard = 0;
       while (state.acc >= TICK && !c.deciding && !c.dead && guard < 800) {
         state.acc -= TICK;
@@ -149,9 +239,44 @@ function render() {
       renderPreview(els.previewCtx, playScene.engine, PIECES);
       updateStats(els.statEls, playScene.engine, playStats, playScene.runner);
     }
+  } else if (state.activeTab === "pixel") {
+    renderPixel();
   } else if (replayTab && replayTab.scene) {
     const s = replayTab.scene;
     renderBoard(els.replayCtx, s.engine, s.controller.anim, null, false, PIECES, s.controller.dead);
+  }
+}
+
+function renderPixel() {
+  if (!pixelScene) return;
+  const c = pixelScene.controller;
+  renderPixelBoard(els.pixelBoard.getContext("2d"), pixelScene.env, PIECES);
+  renderPixelPreview(els.pixelPreview.getContext("2d"), pixelScene.env, PIECES);
+  if (c.lastObs) drawObsInset(els.pixelEye.getContext("2d"), els.pixelEye, c.lastObs);
+
+  els.pxLines.textContent = pixelScene.env.lines;
+  els.pxPieces.textContent = pixelScene.env.pieces;
+  els.pxDecisions.textContent = c.decisions;
+  els.pxMs.textContent = c.lastDecisionMs.toFixed(2);
+  if (c.lastResult) {
+    els.pxAction.textContent = pixelMeta.legend[c.lastResult.action] ?? "—";
+    const aux = c.lastResult.aux;
+    els.pxAux.textContent = (aux && aux.rot != null)
+      ? `rot ${aux.rot} · col ${aux.col}` : "—";
+  }
+
+  // Activation view — redraw only on a fresh inference (≈10 Hz).
+  if (state.showActivations && c.lastResult && c.decisions !== lastDrawnDecision) {
+    lastDrawnDecision = c.decisions;
+    const acts = c.lastResult.activations;
+    if (acts.conv1) drawFeatureMaps(els.actConv1.getContext("2d"), els.actConv1, acts.conv1, 4);
+    if (acts.conv2) drawFeatureMaps(els.actConv2.getContext("2d"), els.actConv2, acts.conv2, 8);
+    if (acts.conv3) drawFeatureMaps(els.actConv3.getContext("2d"), els.actConv3, acts.conv3, 8);
+    if (acts.fc) drawFcStrip(els.actFc.getContext("2d"), els.actFc, acts.fc.data, acts.fc.len);
+    if (acts.fc && pixelMeta.fcWeight) {
+      drawWireGraph(els.actWire.getContext("2d"), els.actWire, acts.fc.data,
+        pixelMeta.fcWeight, c.lastResult.logits, c.lastResult.action, pixelMeta.legend);
+    }
   }
 }
 
@@ -161,6 +286,9 @@ function setSpeed(sp) {
   state.speed = sp;
   state.acc = 0;
   for (const btn of document.querySelectorAll(".speed-btn")) {
+    btn.classList.toggle("active", btn.dataset.speed === sp);
+  }
+  for (const btn of document.querySelectorAll(".pixel-speed-btn")) {
     btn.classList.toggle("active", btn.dataset.speed === sp);
   }
 }
@@ -200,17 +328,52 @@ function wireControls() {
   });
   els.tabPlay.addEventListener("click", () => switchTab("play"));
   els.tabReplay.addEventListener("click", () => switchTab("replay"));
+  els.tabPixel.addEventListener("click", () => switchTab("pixel"));
+
+  // Pixel controls.
+  if (pixelMeta) {
+    els.pixelAgent.addEventListener("change", async () => {
+      els.pixelAgent.disabled = true;
+      await buildPixelScene();
+      els.pixelAgent.disabled = false;
+    });
+    for (const btn of document.querySelectorAll(".pixel-speed-btn")) {
+      btn.addEventListener("click", () => setSpeed(btn.dataset.speed));
+    }
+    els.pixelPause.addEventListener("click", () => {
+      state.paused = !state.paused;
+      els.pixelPause.textContent = state.paused ? "Resume" : "Pause";
+    });
+    els.pixelRestart.addEventListener("click", async () => {
+      await buildPixelScene();
+      state.paused = false;
+      els.pixelPause.textContent = "Pause";
+    });
+    els.pixelSeed.addEventListener("change", async () => { await buildPixelScene(); });
+    els.pixelActToggle.addEventListener("change", () => {
+      state.showActivations = els.pixelActToggle.checked;
+      els.pixelActivations.classList.toggle("hidden", !state.showActivations);
+    });
+  }
 }
 
 function switchTab(tab) {
+  if (tab === "pixel" && !pixelMeta) return;
   state.activeTab = tab;
+  state.paused = false;
   els.tabPlay.classList.toggle("active", tab === "play");
   els.tabReplay.classList.toggle("active", tab === "replay");
+  els.tabPixel.classList.toggle("active", tab === "pixel");
   els.panelPlay.classList.toggle("hidden", tab !== "play");
   els.panelReplay.classList.toggle("hidden", tab !== "replay");
+  els.panelPixel.classList.toggle("hidden", tab !== "pixel");
+  // Pixel is 1×/4× only; clamp a v1 MAX/20× selection on entry.
+  if (tab === "pixel" && !(state.speed === "1" || state.speed === "4")) setSpeed("1");
+  els.pause.textContent = "Pause";
+  els.pixelPause.textContent = "Pause";
 }
 
-// ---- Self-test -------------------------------------------------------------
+// ---- Self-tests ------------------------------------------------------------
 
 async function doSelfTest() {
   const onnxAgents = manifest.agents.filter((a) => a.type === "onnx");
@@ -245,6 +408,38 @@ async function doSelfTest() {
   }
 }
 
+// 2 fixed obs stacks -> final pixel ONNX; compare logits within tol (1e-3).
+async function doPixelSelfTest() {
+  if (!pixelMeta || !pixelMeta.selftest || !ort) return;
+  els.selftestPixel.classList.remove("hidden");
+  try {
+    const sidecar = await fetch("./models/" + pixelMeta.selftest.path).then((r) => r.json());
+    const raw = Uint8Array.from(atob(sidecar.stacks_b64), (ch) => ch.charCodeAt(0));
+    const [n] = sidecar.shape;
+    const frameLen = 4 * 96 * 96;
+    const finalAgent = pixelMeta.byId[pixelMeta.final];
+    const pa = await getPixelSession(finalAgent);
+    const tol = sidecar.tol ?? 1e-3;
+    let maxErr = 0;
+    for (let s = 0; s < n; s++) {
+      // Reconstruct the [4,96,96] stack (already channel-major) and normalize.
+      const stackU8 = raw.subarray(s * frameLen, (s + 1) * frameLen);
+      const tensor = new Float32Array(frameLen);
+      for (let i = 0; i < frameLen; i++) tensor[i] = stackU8[i] / 255;
+      const out = await pa.session.run({ [pa.inputName]: new ort.Tensor("float32", tensor, [1, 4, 96, 96]) });
+      const got = out.logits.data;
+      const exp = sidecar.expected_logits[s];
+      for (let i = 0; i < exp.length; i++) maxErr = Math.max(maxErr, Math.abs(got[i] - exp[i]));
+    }
+    const pass = maxErr <= tol;
+    els.selftestPixel.textContent = `pixel self-test: ${pass ? "PASS" : "FAIL"} (max err ${maxErr.toExponential(1)})`;
+    els.selftestPixel.className = `selftest ${pass ? "pass" : "fail"}`;
+  } catch (e) {
+    els.selftestPixel.textContent = `pixel self-test: ERROR ${e.message}`;
+    els.selftestPixel.className = "selftest fail";
+  }
+}
+
 // ---- Init ------------------------------------------------------------------
 
 async function init() {
@@ -256,6 +451,7 @@ async function init() {
 
   manifest = await fetch("./models/manifest.json").then((r) => r.json());
   for (const a of manifest.agents) agentsById[a.id] = a;
+  pixelMeta = parsePixelManifest(manifest);
 
   els.selftest.textContent = "loading ONNX runtime…";
   try {
@@ -275,10 +471,30 @@ async function init() {
     if (a.type === "onnx" && !ort) opt.disabled = true;
     els.agent.appendChild(opt);
   }
-  // Default to a strong classical agent for an immediate, non-toppling display.
   els.agent.value = agentsById["cem"] ? "cem" : manifest.agents[0].id;
 
   drawCurve(els.curveCtx, manifest.curve);
+
+  // Keypads.
+  playKeypad = new Keypad(els.playKeypad);
+
+  // Pixel tab setup (only when the manifest carries pixel agents).
+  if (pixelMeta) {
+    FrameEnv = makeFrameEnv(piecesJson).FrameEnv;
+    renderEnv = makeRenderObs(piecesJson).renderEnv;
+    pixelKeypad = new Keypad(els.pixelKeypad);
+    els.tabPixel.classList.remove("hidden");
+    els.pixelAgent.innerHTML = "";
+    for (const a of pixelMeta.agents) {
+      const opt = document.createElement("option");
+      opt.value = a.id;
+      opt.textContent = a.label;
+      if (!ort) opt.disabled = true;
+      els.pixelAgent.appendChild(opt);
+    }
+    els.pixelAgent.value = pixelMeta.final;
+  }
+
   wireControls();
   setSpeed("1");
 
@@ -297,7 +513,12 @@ async function init() {
   });
   replayTab.init();
 
+  if (pixelMeta && ort) {
+    try { await buildPixelScene(); } catch (e) { /* surfaced via pixel self-test */ }
+  }
+
   doSelfTest();
+  doPixelSelfTest();
 
   state.lastTime = performance.now();
   requestAnimationFrame(frame);
