@@ -1,5 +1,8 @@
 runs/
 demo/vendor/
+demo/models/*
+!demo/models/.gitkeep
+demo/package-lock.json
 node_modules/
 __pycache__/
 *.egg-info

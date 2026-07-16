@@ -1,5 +1,8 @@
 {
   "name": "tetris-demo",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "onnxruntime-web": "^1.27.0"
+  }
 }
